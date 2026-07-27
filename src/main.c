@@ -52,6 +52,7 @@ static void accel_diagnostic_task(void *arg) {
 }
 #endif
 
+#ifndef UNIT_TESTING
 void app_main(void) {
 #if CALIBRATION_MODE
     calibration_mode_start();
@@ -77,3 +78,4 @@ void app_main(void) {
     ESP_LOGI(TAG, "impact audio ECU booted; active_axis=%d threshold=%d battery=%.2fV", config.axis, config.threshold_raw, battery_get_voltage());
 #endif
 }
+#endif
