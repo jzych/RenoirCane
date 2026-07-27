@@ -74,6 +74,9 @@ Testing/
 .pio/
 __pycache__/
 *.py[cod]
+calibration_app/.venv/
+calibration_app/.buildozer/
+calibration_app/bin/
 sdkconfig.tinypico
 sdkconfig.tinypico_calibration
 sdkconfig.tinypico_test
