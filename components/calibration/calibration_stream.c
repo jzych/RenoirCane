@@ -20,6 +20,29 @@ static uint32_t s_samples_acquired;
 static uint32_t s_samples_transmitted;
 static uint32_t s_samples_dropped;
 
+static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payload_length);
+
+static void process_commands(const calibration_metadata_v1_t *metadata) {
+    static uint8_t frame[CALIBRATION_MAX_ENCODED_PACKET];
+    static size_t frame_length;
+    uint8_t incoming[64];
+    int count = uart_read_bytes(UART_NUM_0, incoming, sizeof(incoming), 0U);
+    for (int index = 0; index < count; ++index) {
+        if (incoming[index] == 0U) {
+            uint8_t raw[CALIBRATION_MAX_RAW_PACKET];
+            calibration_packet_view_t packet;
+            if (frame_length != 0U && calibration_packet_decode(frame, frame_length, raw, sizeof(raw), &packet) && packet.packet_type == CAL_CMD_GET_METADATA && packet.payload_length == 0U) {
+                (void)write_packet(CAL_PKT_METADATA, metadata, sizeof(*metadata));
+            }
+            frame_length = 0U;
+        } else if (frame_length < sizeof(frame)) {
+            frame[frame_length++] = incoming[index];
+        } else {
+            frame_length = 0U;
+        }
+    }
+}
+
 static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payload_length) {
     uint8_t encoded[CALIBRATION_MAX_ENCODED_PACKET];
     size_t length = calibration_packet_encode(packet_type, payload, payload_length, encoded, sizeof(encoded));
@@ -60,6 +83,7 @@ static void transport_task(void *arg) {
     (void)write_packet(CAL_PKT_METADATA, &metadata, sizeof(metadata));
     TickType_t last_status_tick = xTaskGetTickCount();
     for (;;) {
+        process_commands(&metadata);
         calibration_sample_batch_v1_t batch = {.count = 0U};
         if (xQueueReceive(s_sample_queue, &batch.samples[0], pdMS_TO_TICKS(100)) == pdPASS) {
             batch.count = 1U;

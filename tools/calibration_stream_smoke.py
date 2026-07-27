@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "calibration_app"))
 
 from app.controller import CalibrationController
-from app.protocol import FrameParser
+from app.protocol import CAL_CMD_GET_METADATA, FrameParser, encode_frame
 
 
 def main() -> int:
@@ -30,6 +30,8 @@ def main() -> int:
         time.sleep(0.1)
         port.rts = False
         port.dtr = True
+        time.sleep(0.5)
+        port.write(encode_frame(CAL_CMD_GET_METADATA, b""))
         deadline = time.monotonic() + args.seconds
         while time.monotonic() < deadline:
             for packet in frame_parser.feed(port.read(4096)):
