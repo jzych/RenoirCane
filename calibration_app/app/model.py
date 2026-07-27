@@ -20,6 +20,7 @@ class GraphConfig:
     range_g: int
     capacity: int
     threshold_g: float
+    sensitivity_mg_lsb: float
 
 
 class CalibrationModel:
@@ -33,7 +34,7 @@ class CalibrationModel:
         rate, range_g, axis, threshold, sensitivity, _int1, _int2, _format, _reserved = struct.unpack("<HBBhfBBBB", payload)
         axis_label = ("X", "Y", "Z")[axis]
         capacity = round(rate * 30)
-        self.graph_config = GraphConfig(axis_label, range_g, capacity, abs(threshold) * sensitivity / 1000.0)
+        self.graph_config = GraphConfig(axis_label, range_g, capacity, abs(threshold) * sensitivity / 1000.0, sensitivity)
         self.samples = deque(self.samples, maxlen=capacity)
 
     def append_samples(self, samples: list[Sample]) -> None:

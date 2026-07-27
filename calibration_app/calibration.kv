@@ -1,0 +1,23 @@
+<CalibrationRoot>:
+    orientation: "vertical"
+    padding: "8dp"
+    spacing: "8dp"
+    BoxLayout:
+        size_hint_y: None
+        height: "48dp"
+        Button:
+            text: "Refresh"
+            on_release: root.refresh_devices()
+        Button:
+            text: "Connect / Disconnect"
+            on_release: root.connect_or_disconnect()
+    Label:
+        text: root.device_text
+        size_hint_y: None
+        height: "24dp"
+    Label:
+        text: root.status_text
+        size_hint_y: None
+        height: "24dp"
+    CalibrationGraph:
+        id: graph
