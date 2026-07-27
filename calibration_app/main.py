@@ -9,6 +9,7 @@ from app.controller import CalibrationController
 from app.kivy_graph import CalibrationGraph
 from app.platform import make_serial_backend
 from app.reader import CalibrationReader
+from app.resources import asset_path
 from app.serial_backends.android_usb_serial import AndroidUsbSerialBackend, UsbPermissionPendingError
 from app.serial_backends.windows_serial import WindowsSerialBackend
 
@@ -63,7 +64,7 @@ class CalibrationRoot(BoxLayout):
 
 class CalibrationApp(App):
     def build(self):
-        return Builder.load_file("calibration.kv")
+        return Builder.load_file(str(asset_path("calibration.kv")))
 
 
 if __name__ == "__main__":

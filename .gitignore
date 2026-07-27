@@ -75,8 +75,12 @@ Testing/
 __pycache__/
 *.py[cod]
 calibration_app/.venv/
+calibration_app/.winvenv/
 calibration_app/.buildozer/
 calibration_app/bin/
+calibration_app/build/
+calibration_app/dist/
+calibration_app/CaneCalibration.spec
 sdkconfig.tinypico
 sdkconfig.tinypico_calibration
 sdkconfig.tinypico_test
