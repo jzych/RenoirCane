@@ -64,7 +64,8 @@ class CalibrationRoot(BoxLayout):
 
 class CalibrationApp(App):
     def build(self):
-        return Builder.load_file(str(asset_path("calibration.kv")))
+        Builder.load_file(str(asset_path("calibration.kv")))
+        return CalibrationRoot()
 
 
 if __name__ == "__main__":
