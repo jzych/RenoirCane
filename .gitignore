@@ -71,6 +71,7 @@ Testing/
 
 # generated files
 .vscode/
+.pio/
 sdkconfig.tinypico
 sdkconfig.tinypico_calibration
 sdkconfig.tinypico_test
