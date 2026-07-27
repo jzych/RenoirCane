@@ -12,6 +12,7 @@
 #define LIS2DW12_CTRL2 0x21
 #define LIS2DW12_CTRL3 0x22
 #define LIS2DW12_CTRL4_INT1_PAD_CTRL 0x23
+#define LIS2DW12_CTRL5_INT2_PAD_CTRL 0x24
 #define LIS2DW12_CTRL6 0x25
 #define LIS2DW12_TAP_THS_X 0x30
 #define LIS2DW12_TAP_THS_Y 0x31
@@ -24,6 +25,8 @@
 
 static const char *TAG = "ACCEL";
 static accelerometer_irq_callback_t s_callback;
+static accelerometer_irq_callback_t s_data_ready_callback;
+static bool s_isr_service_installed;
 
 static bool read_register(uint8_t reg, uint8_t *data, size_t length) {
     return i2c_master_write_read_device(APP_I2C_PORT, APP_ACCEL_I2C_ADDR, &reg, 1, data, length, pdMS_TO_TICKS(50)) == ESP_OK;
@@ -35,6 +38,15 @@ static bool write_register(uint8_t reg, uint8_t value) {
 }
 
 static void IRAM_ATTR accel_isr(void *arg) { (void)arg; if (s_callback != NULL) s_callback(); }
+static void IRAM_ATTR data_ready_isr(void *arg) { (void)arg; if (s_data_ready_callback != NULL) s_data_ready_callback(); }
+
+static bool install_isr_service(void) {
+    if (s_isr_service_installed) return true;
+    esp_err_t result = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) return false;
+    s_isr_service_installed = true;
+    return true;
+}
 
 bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
     i2c_config_t i2c = {.mode = I2C_MODE_MASTER, .sda_io_num = APP_I2C_SDA_GPIO, .scl_io_num = APP_I2C_SCL_GPIO, .sda_pullup_en = GPIO_PULLUP_ENABLE, .scl_pullup_en = GPIO_PULLUP_ENABLE, .master.clk_speed = APP_I2C_FREQ_HZ};
@@ -46,9 +58,15 @@ bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
         !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, 0x40) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
     s_callback = irq_callback;
     gpio_config_t gpio = {.pin_bit_mask = 1ULL << APP_ACCEL_INT1_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_POSEDGE};
-    if (gpio_config(&gpio) != ESP_OK || gpio_install_isr_service(ESP_INTR_FLAG_IRAM) != ESP_OK || gpio_isr_handler_add(APP_ACCEL_INT1_GPIO, accel_isr, NULL) != ESP_OK) return false;
+    if (gpio_config(&gpio) != ESP_OK || !install_isr_service() || gpio_isr_handler_add(APP_ACCEL_INT1_GPIO, accel_isr, NULL) != ESP_OK) return false;
     ESP_LOGI(TAG, "LIS2DW12 detected at 0x%02x; INT1=GPIO%d INT2=GPIO%d", APP_ACCEL_I2C_ADDR, APP_ACCEL_INT1_GPIO, APP_ACCEL_INT2_GPIO);
     return true;
+}
+
+bool accelerometer_set_data_ready_callback(accelerometer_irq_callback_t callback) {
+    s_data_ready_callback = callback;
+    gpio_config_t gpio = {.pin_bit_mask = 1ULL << APP_ACCEL_INT2_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_POSEDGE};
+    return write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01) && gpio_config(&gpio) == ESP_OK && install_isr_service() && gpio_isr_handler_add(APP_ACCEL_INT2_GPIO, data_ready_isr, NULL) == ESP_OK;
 }
 
 bool accelerometer_read_sample(accel_sample_t *sample) {

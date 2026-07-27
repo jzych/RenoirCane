@@ -7,7 +7,13 @@
 #include "status_led.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "calibration_mode.h"
 
+#ifndef CALIBRATION_MODE
+#define CALIBRATION_MODE 0
+#endif
+
+#if !CALIBRATION_MODE
 static const char *TAG = "CANE";
 static TaskHandle_t s_impact_task;
 
@@ -44,8 +50,12 @@ static void accel_diagnostic_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
+#endif
 
 void app_main(void) {
+#if CALIBRATION_MODE
+    calibration_mode_start();
+#else
     impact_config_t config = {
         .axis = APP_IMPACT_ACTIVE_AXIS,
         .threshold_raw = APP_IMPACT_THRESHOLD_RAW,
@@ -65,4 +75,5 @@ void app_main(void) {
     }
     debug_console_init();
     ESP_LOGI(TAG, "impact audio ECU booted; active_axis=%d threshold=%d battery=%.2fV", config.axis, config.threshold_raw, battery_get_voltage());
+#endif
 }
