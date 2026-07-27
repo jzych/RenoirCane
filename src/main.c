@@ -1,6 +1,7 @@
 #include "audio.h"
 #include "accelerometer.h"
 #include "battery.h"
+#include "debug_console.h"
 #include "esp_log.h"
 #include "impact.h"
 #include "status_led.h"
@@ -20,10 +21,11 @@ static void impact_task(void *arg) {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        bool tap_candidate = accelerometer_read_impact_status();
         accelerometer_clear_interrupt();
         accel_sample_t sample;
         impact_event_t event;
-        if (accelerometer_read_sample(&sample) && impact_validate_candidate(&sample, sample.timestamp_us, &event)) {
+        if (tap_candidate && accelerometer_read_sample(&sample) && impact_validate_candidate(&sample, sample.timestamp_us, &event)) {
             impact_mark_accepted(event.timestamp_us);
             ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z);
         }
@@ -61,5 +63,6 @@ void app_main(void) {
     } else {
         xTaskCreate(accel_diagnostic_task, "accel_diag", 3072, NULL, 5, NULL);
     }
+    debug_console_init();
     ESP_LOGI(TAG, "impact audio ECU booted; active_axis=%d threshold=%d battery=%.2fV", config.axis, config.threshold_raw, battery_get_voltage());
 }
