@@ -53,7 +53,7 @@ bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
     if (i2c_param_config(APP_I2C_PORT, &i2c) != ESP_OK || i2c_driver_install(APP_I2C_PORT, i2c.mode, 0, 0, 0) != ESP_OK) return false;
     uint8_t identity = 0;
     if (!read_register(LIS2DW12_WHO_AM_I, &identity, 1) || identity != LIS2DW12_WHO_AM_I_VALUE) { ESP_LOGE(TAG, "WHO_AM_I=0x%02x", identity); return false; }
-    if (!write_register(LIS2DW12_CTRL1, 0x94) || !write_register(LIS2DW12_CTRL2, 0x0C) || !write_register(LIS2DW12_CTRL3, 0x10) || !write_register(LIS2DW12_CTRL6, 0x30) ||
+    if (!write_register(LIS2DW12_CTRL1, 0x84) || !write_register(LIS2DW12_CTRL2, 0x0C) || !write_register(LIS2DW12_CTRL3, 0x10) || !write_register(LIS2DW12_CTRL6, 0x30) ||
         !write_register(LIS2DW12_TAP_THS_X, 0x00) || !write_register(LIS2DW12_TAP_THS_Y, 0x08) || !write_register(LIS2DW12_TAP_THS_Z, 0x40) || !write_register(LIS2DW12_INT_DUR, 0x06) ||
         !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, 0x40) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
     s_callback = irq_callback;

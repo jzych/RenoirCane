@@ -17,4 +17,6 @@ void calibration_mode_start(void) {
         ESP_LOGE(TAG, "calibration accelerometer initialization failed");
         return;
     }
+    accel_sample_t initial_sample;
+    (void)accelerometer_read_sample(&initial_sample);
 }
