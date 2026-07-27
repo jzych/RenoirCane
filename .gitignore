@@ -72,6 +72,8 @@ Testing/
 # generated files
 .vscode/
 .pio/
+__pycache__/
+*.py[cod]
 sdkconfig.tinypico
 sdkconfig.tinypico_calibration
 sdkconfig.tinypico_test
