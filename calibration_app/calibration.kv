@@ -5,6 +5,10 @@
     BoxLayout:
         size_hint_y: None
         height: "48dp"
+        Spinner:
+            text: root.device_text
+            values: root.device_labels
+            on_text: root.select_device(self.text)
         Button:
             text: "Refresh"
             on_release: root.refresh_devices()
