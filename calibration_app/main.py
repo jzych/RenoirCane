@@ -8,6 +8,7 @@ from kivy.utils import platform
 from app.controller import CalibrationController
 from app.kivy_graph import CalibrationGraph
 from app.platform import make_serial_backend
+from app.protocol import CAL_CMD_GET_METADATA, encode_frame
 from app.reader import CalibrationReader
 from app.resources import asset_path
 from app.serial_backends.android_usb_serial import AndroidUsbSerialBackend, UsbPermissionPendingError
@@ -55,6 +56,7 @@ class CalibrationRoot(BoxLayout):
         if self._device_id is not None:
             try:
                 self.backend.connect(self._device_id, 921600)
+                self.backend.write(encode_frame(CAL_CMD_GET_METADATA, b""))
                 self.reader.start()
             except UsbPermissionPendingError:
                 self.status_text = "USB permission requested; accept it, then connect again"

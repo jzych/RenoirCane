@@ -1,18 +1,27 @@
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from main import CalibrationApp, CalibrationRoot
+from app.protocol import CAL_CMD_GET_METADATA, encode_frame
 from app.serial_backends.base import SerialDevice
 
 
 class FakeBackend:
-    connected = False
+    def __init__(self):
+        self.connected = False
+        self.writes = []
 
     def list_devices(self):
         return [
             SerialDevice("COM3", "COM3 — Bluetooth link"),
             SerialDevice("COM4", "COM4 — USB-Enhanced-SERIAL CH9102"),
         ]
+
+    def connect(self, device_id, baudrate):
+        self.connected = True
+
+    def write(self, data):
+        self.writes.append(data)
 
 
 class CalibrationAppTests(TestCase):
@@ -46,3 +55,15 @@ class CalibrationAppTests(TestCase):
         ])
         self.assertEqual(root.device_text, "COM4 — USB-Enhanced-SERIAL CH9102")
         self.assertEqual(root._device_id, "COM4")
+
+    def test_connect_requests_metadata_from_the_firmware(self):
+        root = CalibrationRoot()
+        backend = FakeBackend()
+        root.backend = backend
+        root.reader = MagicMock()
+        root.refresh_devices()
+
+        root.connect_or_disconnect()
+
+        self.assertEqual(backend.writes, [encode_frame(CAL_CMD_GET_METADATA, b"")])
+        root.reader.start.assert_called_once_with()
