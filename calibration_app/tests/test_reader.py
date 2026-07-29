@@ -1,6 +1,8 @@
 import threading
 
+import app.reader as reader_module
 from app.controller import CalibrationController
+from app.protocol import CAL_PKT_METADATA, encode_frame
 from app.reader import CalibrationReader
 
 
@@ -23,6 +25,24 @@ class FailingBackend:
         self._connected = False
 
 
+class MetadataFrameBackend:
+    def __init__(self) -> None:
+        self._connected = True
+        self.read_called = threading.Event()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def read(self, _size: int) -> bytes:
+        self._connected = False
+        self.read_called.set()
+        return encode_frame(CAL_PKT_METADATA, b"")
+
+    def close(self) -> None:
+        self._connected = False
+
+
 def test_reader_closes_backend_when_serial_read_fails():
     backend = FailingBackend()
     reader = CalibrationReader(backend, CalibrationController())
@@ -33,3 +53,16 @@ def test_reader_closes_backend_when_serial_read_fails():
 
     assert backend.closed is True
     assert reader.error == "USB device detached"
+
+
+def test_reader_logs_decoded_packet_count(monkeypatch):
+    messages = []
+    monkeypatch.setattr(reader_module, "diagnose", messages.append)
+    backend = MetadataFrameBackend()
+    reader = CalibrationReader(backend, CalibrationController())
+
+    reader.start()
+    assert backend.read_called.wait(timeout=1.0)
+    reader.stop()
+
+    assert "Reader decoded packets=1" in messages

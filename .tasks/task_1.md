@@ -1,0 +1,23 @@
+This prompt continues implementation of TinyPICO project with BLE and accelerometer. All implementation decisions made so far are stored in .tasks/database.md file
+
+# [TASK_ID] - [TASK_NAME]
+
+## Objective
+[ONE_SENTENCE_GOAL]
+
+## Scope
+[DESCRIBE THE SELF-CONTAINED MODULE, FEATURE SLICE, OR GROUP OF RELATED FUNCTIONS COVERED BY THIS TASK]
+
+## Restrictions
+[DESCRIBE PARTS THAT ARE DROPPED FROM THIS FEATURE EVEN IF SEEM TO BE RELEVANT]  
+[RESTRICT SCOPE TO GIVEN FILES/MODULES]
+
+##  Additional context
+[POINT TO THE RELEVANT SECTIONS, HEADINGS, OR DESIGN AREAS IN THE ATTACHED COMPEDIUM]
+[Dependencies on previous steps]
+
+
+## Acceptance Criteria
+- [CLEAR, TESTABLE COMPLETION CONDITIONS]
+- [OPTIONAL: INTERFACE / BEHAVIOR VALIDATION]
+- [OPTIONAL: INTEGRATION VALIDATION]

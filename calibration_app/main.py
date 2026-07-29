@@ -11,8 +11,19 @@ from app.platform import make_serial_backend
 from app.protocol import CAL_CMD_GET_METADATA, encode_frame
 from app.reader import CalibrationReader
 from app.resources import asset_path
-from app.serial_backends.android_usb_serial import AndroidUsbSerialBackend, UsbPermissionPendingError
-from app.serial_backends.windows_serial import WindowsSerialBackend
+from app.serial_backends.android_usb_serial import UsbPermissionPendingError
+
+
+def _make_android_backend():
+    from app.serial_backends.android_usb_serial import AndroidUsbSerialBackend
+
+    return AndroidUsbSerialBackend()
+
+
+def _make_windows_backend():
+    from app.serial_backends.windows_serial import WindowsSerialBackend
+
+    return WindowsSerialBackend()
 
 
 class CalibrationRoot(BoxLayout):
@@ -24,8 +35,8 @@ class CalibrationRoot(BoxLayout):
         super().__init__(**kwargs)
         self.backend = make_serial_backend(
             platform,
-            android_factory=AndroidUsbSerialBackend,
-            windows_factory=WindowsSerialBackend,
+            android_factory=_make_android_backend,
+            windows_factory=_make_windows_backend,
         )
         self.controller = CalibrationController()
         self.reader = CalibrationReader(self.backend, self.controller)
@@ -71,10 +82,10 @@ class CalibrationRoot(BoxLayout):
         if self.reader.error is not None:
             self.status_text = f"Disconnected: {self.reader.error}"
             return
-        config = self.controller.model.graph_config
+        config, samples, host_sequence_gaps = self.controller.model.graph_snapshot()
         if config is not None:
-            self.status_text = f"{config.axis_label} axis, ±{config.range_g} g, drops {self.controller.firmware_status.samples_dropped}, gaps {self.controller.model.host_sequence_gaps}"
-            self.ids.graph.render(self.controller.model)
+            self.status_text = f"{config.axis_label} axis, ±{config.range_g} g, drops {self.controller.firmware_status.samples_dropped}, gaps {host_sequence_gaps}"
+            self.ids.graph.render(config, samples)
 
 
 class CalibrationApp(App):

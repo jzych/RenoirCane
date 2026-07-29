@@ -5,13 +5,12 @@ from app.graph import min_max_downsample
 
 
 class CalibrationGraph(Widget):
-    def render(self, model) -> None:
+    def render(self, config, samples) -> None:
         self.canvas.clear()
-        config = model.graph_config
-        if config is None or not model.samples or self.width <= 0 or self.height <= 0:
+        if config is None or not samples or self.width <= 0 or self.height <= 0:
             return
         selected = {"X": "x_raw", "Y": "y_raw", "Z": "z_raw"}[config.axis_label]
-        points = [(sample.timestamp_us, getattr(sample, selected) * config.sensitivity_mg_lsb / 1000.0) for sample in model.samples]
+        points = [(sample.timestamp_us, getattr(sample, selected) * config.sensitivity_mg_lsb / 1000.0) for sample in samples]
         downsampled = min_max_downsample(points, int(self.width))
         start, end = downsampled[0][0], downsampled[-1][0]
         span = max(end - start, 1)

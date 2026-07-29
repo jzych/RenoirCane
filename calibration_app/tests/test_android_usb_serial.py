@@ -1,9 +1,12 @@
 import pytest
+import app.serial_backends.android_usb_serial as android_usb_serial
 
 from app.serial_backends.android_usb_serial import (
     AndroidUsbSerialBackend,
     AndroidUsbUnavailableError,
     UsbPermissionPendingError,
+    _AndroidPort,
+    _PyjniusAndroidUsbBridge,
 )
 from app.serial_backends.base import SerialDevice
 
@@ -48,6 +51,43 @@ class FakePort:
 
     def close(self):
         self.closed = True
+
+
+class DescriptorOnlyDevice:
+    def getDeviceId(self):
+        return 42
+
+    def getVendorId(self):
+        return 0x1A86
+
+    def getProductId(self):
+        return 0x55D4
+
+
+class DescriptorOnlyDriver:
+    def getDevice(self):
+        return DescriptorOnlyDevice()
+
+
+class RawPortWithBytes:
+    def read(self, buffer, _timeout):
+        buffer[:3] = b"\x01\x02\x03"
+        return 3
+
+
+def test_android_port_logs_nonempty_read_without_changing_returned_bytes(monkeypatch):
+    messages = []
+    monkeypatch.setattr(android_usb_serial, "diagnose", messages.append)
+
+    assert _AndroidPort(RawPortWithBytes()).read(16) == b"\x01\x02\x03"
+    assert messages == ["USB read bytes=3 hex=010203"]
+
+
+def test_describe_android_driver_uses_usb_ids_without_class_name_access():
+    driver = _PyjniusAndroidUsbBridge._describe(DescriptorOnlyDriver())
+
+    assert driver.device_id == 42
+    assert driver.label == "USB serial — 1a86:55d4"
 
 
 def test_lists_probed_android_usb_serial_devices():

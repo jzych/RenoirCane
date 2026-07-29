@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.diagnostics import diagnose
 from app.serial_backends.base import SerialDevice
 
 
@@ -38,9 +39,13 @@ class _AndroidPort:
     def read(self, size: int) -> bytes:
         buffer = bytearray(size)
         received = self._raw.read(buffer, self.READ_TIMEOUT_MS)
-        return bytes(buffer[:received]) if received > 0 else b""
+        data = bytes(buffer[:received]) if received > 0 else b""
+        if data:
+            diagnose(f"USB read bytes={len(data)} hex={data[:32].hex()}")
+        return data
 
     def write(self, data: bytes) -> None:
+        diagnose(f"USB write bytes={len(data)} hex={data[:32].hex()}")
         self._raw.write(data, self.WRITE_TIMEOUT_MS)
 
     def close(self) -> None:
@@ -100,6 +105,7 @@ class _PyjniusAndroidUsbBridge:
                 self._serial_port.STOPBITS_1,
                 self._serial_port.PARITY_NONE,
             )
+            diagnose(f"USB open device={driver.device_id} baud={baudrate}")
         except Exception:
             port.close()
             raise
@@ -108,10 +114,7 @@ class _PyjniusAndroidUsbBridge:
     @staticmethod
     def _describe(raw_driver: Any) -> _AndroidDriver:
         device = raw_driver.getDevice()
-        label = (
-            f"{raw_driver.getClass().getSimpleName()} — USB "
-            f"{device.getVendorId():04x}:{device.getProductId():04x}"
-        )
+        label = f"USB serial — {device.getVendorId():04x}:{device.getProductId():04x}"
         return _AndroidDriver(raw_driver, int(device.getDeviceId()), label)
 
 

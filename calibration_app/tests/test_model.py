@@ -34,3 +34,16 @@ def test_sequence_gap_and_ring_capacity_are_metadata_driven():
     assert len(model.samples) == 30
     assert model.samples[0].sequence == 3
     assert model.samples[-1].sequence == 32
+
+
+def test_graph_snapshot_copies_config_samples_and_gap_count():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
+    model.append_samples([Sample(1, 10, 1, 2, 3), Sample(3, 20, 4, 5, 6)])
+
+    config, samples, gaps = model.graph_snapshot()
+    model.append_samples([Sample(4, 30, 7, 8, 9)])
+
+    assert config.axis_label == "Y"
+    assert [sample.sequence for sample in samples] == [1, 3]
+    assert gaps == 1

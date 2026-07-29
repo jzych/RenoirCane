@@ -1,7 +1,12 @@
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from main import CalibrationApp, CalibrationRoot
+from app.model import GraphConfig, Sample
 from app.protocol import CAL_CMD_GET_METADATA, encode_frame
 from app.serial_backends.base import SerialDevice
 
@@ -24,7 +29,28 @@ class FakeBackend:
         self.writes.append(data)
 
 
+class GraphRecorder:
+    def render(self, config, samples):
+        self.received = config, samples
+
+
 class CalibrationAppTests(TestCase):
+    def test_main_imports_without_windows_serial_module(self):
+        script = (
+            "import sys; "
+            "sys.modules['app.serial_backends.windows_serial'] = None; "
+            "import main"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_build_loads_kv_rule_and_returns_calibration_root(self):
         app = CalibrationApp()
 
@@ -67,3 +93,20 @@ class CalibrationAppTests(TestCase):
 
         self.assertEqual(backend.writes, [encode_frame(CAL_CMD_GET_METADATA, b"")])
         root.reader.start.assert_called_once_with()
+
+    def test_refresh_renders_the_model_snapshot_not_live_samples(self):
+        config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
+        samples = (Sample(1, 10, 1, 2, 3),)
+        root = CalibrationRoot()
+        root.reader = SimpleNamespace(error=None)
+        root.controller.model = SimpleNamespace(
+            graph_snapshot=lambda: (config, samples, 7)
+        )
+        root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
+        recorder = GraphRecorder()
+        root.ids["graph"] = recorder
+
+        root.refresh(0)
+
+        self.assertEqual(recorder.received, (config, samples))
+        self.assertTrue(root.status_text.endswith("gaps 7"))

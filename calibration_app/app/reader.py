@@ -1,6 +1,7 @@
 import threading
 
 from app.controller import CalibrationController
+from app.diagnostics import diagnose
 from app.protocol import FrameParser
 from app.serial_backends.base import SerialBackend
 
@@ -32,7 +33,13 @@ class CalibrationReader:
     def _run(self) -> None:
         try:
             while not self._stop.is_set() and self._backend.connected:
-                for packet in self._parser.feed(self._backend.read(4096)):
+                previous_bad_packets = self._parser.bad_packet_count
+                packets = self._parser.feed(self._backend.read(4096))
+                if packets:
+                    diagnose(f"Reader decoded packets={len(packets)}")
+                if self._parser.bad_packet_count != previous_bad_packets:
+                    diagnose(f"Reader bad_packets={self._parser.bad_packet_count}")
+                for packet in packets:
                     self._controller.handle_packet(packet)
         except Exception as error:
             self._error = str(error)
