@@ -43,6 +43,7 @@ static pcm_kind_t s_pcm_kind;
 static int64_t s_idle_since_us;
 static int64_t s_drain_at_us;
 static bool s_initialized;
+static bool s_source_ready;
 static bool s_started;
 static bool s_reconnect_requested;
 
@@ -231,6 +232,16 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
                 set_state(BT_AUDIO_STREAMING);
             }
             break;
+        case ESP_A2D_PROF_STATE_EVT:
+            if (param->a2d_prof_stat.init_state == ESP_A2D_INIT_SUCCESS) {
+                portENTER_CRITICAL(&s_lock);
+                s_source_ready = true;
+                portEXIT_CRITICAL(&s_lock);
+                wake_worker();
+            } else {
+                media_error("A2DP source profile initialization", ESP_FAIL);
+            }
+            break;
         default:
             break;
     }
@@ -239,8 +250,8 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
 static void attempt_connection(int64_t now_us) {
     bool should_connect;
     portENTER_CRITICAL(&s_lock);
-    should_connect =
-        s_policy.state != BT_AUDIO_ERROR && bluetooth_audio_policy_should_connect(&s_policy, now_us);
+    should_connect = s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
+                     bluetooth_audio_policy_should_connect(&s_policy, now_us);
     portEXIT_CRITICAL(&s_lock);
     if (!should_connect) {
         return;
