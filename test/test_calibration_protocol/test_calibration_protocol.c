@@ -127,6 +127,12 @@ void test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playb
         IMPACT_CANDIDATE_PROCESSED, 1500000, 500000, &audio_busy_until_us));
 }
 
+void test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration(void) {
+    float threshold_g = (float)APP_IMPACT_THRESHOLD_RAW * APP_ACCEL_SENSITIVITY_MG_LSB / 1000.0f;
+
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.928f, threshold_g);
+}
+
 void app_main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_cobs_round_trip_preserves_zero_bytes);
@@ -137,5 +143,6 @@ void app_main(void) {
     RUN_TEST(test_impact_classifier_accepts_exact_threshold_and_signed_saturation);
     RUN_TEST(test_audio_impact_duration_is_available_for_calibration_timing);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
+    RUN_TEST(test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration);
     UNITY_END();
 }
