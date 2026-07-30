@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "audio.h"
+#include "bluetooth_audio_policy.h"
 #include "calibration_protocol.h"
 #include "impact.h"
 #include "unity.h"
@@ -217,6 +218,38 @@ void test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acc
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.928f, threshold_g);
 }
 
+void test_bluetooth_policy_requests_the_initial_connection_only_once(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, 0));
+}
+
+void test_bluetooth_policy_stops_requesting_after_a_connection_callback(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    bluetooth_audio_policy_on_connected(&policy);
+
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, 10000000));
+}
+
+void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect(void) {
+    bt_audio_policy_t policy;
+    const int64_t disconnected_at_us = 1234567;
+
+    bluetooth_audio_policy_init(&policy);
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    bluetooth_audio_policy_on_disconnected(&policy, disconnected_at_us);
+
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 9999999));
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 10000000));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 10000001));
+}
+
 void app_main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_cobs_round_trip_preserves_zero_bytes);
@@ -232,5 +265,8 @@ void app_main(void) {
     RUN_TEST(test_audio_impact_duration_is_available_for_calibration_timing);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
     RUN_TEST(test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration);
+    RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
+    RUN_TEST(test_bluetooth_policy_stops_requesting_after_a_connection_callback);
+    RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
     UNITY_END();
 }
