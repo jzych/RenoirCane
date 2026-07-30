@@ -200,6 +200,16 @@ void test_audio_impact_duration_is_available_for_calibration_timing(void) {
     TEST_ASSERT_GREATER_THAN_UINT32(0, audio_impact_duration_us());
 }
 
+void test_audio_stop_cancels_active_pcm_playback(void) {
+    audio_init();
+    TEST_ASSERT_TRUE(audio_start_silence(1000U));
+    TEST_ASSERT_TRUE(audio_is_active());
+
+    audio_stop();
+
+    TEST_ASSERT_FALSE(audio_is_active());
+}
+
 void test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends(void) {
     int64_t audio_busy_until_us = 0;
 
@@ -263,6 +273,7 @@ void app_main(void) {
     RUN_TEST(test_impact_threshold_crossing_preserves_refractory_skip_outcomes);
     RUN_TEST(test_impact_threshold_crossing_detects_negative_saturation_after_rearming);
     RUN_TEST(test_audio_impact_duration_is_available_for_calibration_timing);
+    RUN_TEST(test_audio_stop_cancels_active_pcm_playback);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
     RUN_TEST(test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration);
     RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
