@@ -25,6 +25,13 @@ def test_metadata_configures_history_axis_range_and_thresholds():
     assert model.graph_config.threshold_g == pytest.approx(7.995392)
 
 
+def test_metadata_adds_twenty_percent_graph_headroom():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(800, 10, 1, 6000, 0.976))
+
+    assert model.graph_config.display_range_g == pytest.approx(12.0)
+
+
 def test_sequence_gap_and_ring_capacity_are_metadata_driven():
     model = CalibrationModel()
     model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
@@ -36,14 +43,57 @@ def test_sequence_gap_and_ring_capacity_are_metadata_driven():
     assert model.samples[-1].sequence == 32
 
 
-def test_graph_snapshot_copies_config_samples_and_gap_count():
+def test_graph_snapshot_copies_config_samples_events_and_gap_count():
     model = CalibrationModel()
     model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
     model.append_samples([Sample(1, 10, 1, 2, 3), Sample(3, 20, 4, 5, 6)])
 
-    config, samples, gaps = model.graph_snapshot()
+    config, samples, impact_events, gaps = model.graph_snapshot()
     model.append_samples([Sample(4, 30, 7, 8, 9)])
 
     assert config.axis_label == "Y"
     assert [sample.sequence for sample in samples] == [1, 3]
+    assert impact_events == ()
     assert gaps == 1
+
+
+def test_graph_snapshot_expires_impact_events_outside_the_sample_window():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
+    model.record_impact_event(0, "processed")
+    model.append_samples([Sample(index, index * 1_000_000, 0, 0, 0) for index in range(31)])
+    model.record_impact_event(30_000_000, "skipped")
+
+    _config, _samples, impact_events, _gaps = model.graph_snapshot()
+
+    assert [(event.timestamp_us, event.outcome) for event in impact_events] == [
+        (30_000_000, "skipped"),
+    ]
+
+
+def test_graph_snapshot_keeps_a_newer_impact_until_samples_reach_its_timestamp():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
+    model.append_samples([Sample(1, 1_000_000, 0, 0, 0)])
+
+    model.record_impact_event(1_500_000, "processed")
+
+    _config, _samples, impact_events, _gaps = model.graph_snapshot()
+    assert [(event.timestamp_us, event.outcome) for event in impact_events] == [
+        (1_500_000, "processed"),
+    ]
+
+
+def test_graph_snapshot_expires_events_outside_a_window_that_crosses_timestamp_wrap():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))
+    start_timestamp_us = 0xFFF00000
+    model.record_impact_event(start_timestamp_us, "processed")
+    model.append_samples([
+        Sample(index, (start_timestamp_us + index * 1_000_000) & 0xFFFFFFFF, 0, 0, 0)
+        for index in range(31)
+    ])
+
+    _config, _samples, impact_events, _gaps = model.graph_snapshot()
+
+    assert impact_events == ()

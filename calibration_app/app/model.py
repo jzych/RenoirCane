@@ -16,6 +16,12 @@ class Sample:
 
 
 @dataclass(frozen=True)
+class ImpactEvent:
+    timestamp_us: int
+    outcome: str
+
+
+@dataclass(frozen=True)
 class GraphConfig:
     axis_label: str
     range_g: int
@@ -23,10 +29,15 @@ class GraphConfig:
     threshold_g: float
     sensitivity_mg_lsb: float
 
+    @property
+    def display_range_g(self) -> float:
+        return self.range_g * 1.2
+
 
 class CalibrationModel:
     def __init__(self) -> None:
         self.samples: deque[Sample] = deque()
+        self.impact_events: deque[ImpactEvent] = deque()
         self.graph_config: GraphConfig | None = None
         self.host_sequence_gaps = 0
         self._expected_sequence: int | None = None
@@ -47,7 +58,31 @@ class CalibrationModel:
                     self.host_sequence_gaps += (sample.sequence - self._expected_sequence) & 0xFFFFFFFF
                 self._expected_sequence = (sample.sequence + 1) & 0xFFFFFFFF
                 self.samples.append(sample)
+            self._expire_impact_events()
 
-    def graph_snapshot(self) -> tuple[GraphConfig | None, tuple[Sample, ...], int]:
+    def record_impact_event(self, timestamp_us: int, outcome: str) -> None:
         with self._lock:
-            return self.graph_config, tuple(self.samples), self.host_sequence_gaps
+            self.impact_events.append(ImpactEvent(timestamp_us, outcome))
+            self._expire_impact_events()
+
+    def graph_snapshot(self) -> tuple[GraphConfig | None, tuple[Sample, ...], tuple[ImpactEvent, ...], int]:
+        with self._lock:
+            self._expire_impact_events()
+            return self.graph_config, tuple(self.samples), tuple(self.impact_events), self.host_sequence_gaps
+
+    def _expire_impact_events(self) -> None:
+        if not self.samples:
+            return
+        oldest_timestamp = self.samples[0].timestamp_us
+        latest_timestamp = self.samples[-1].timestamp_us
+        window_us = (latest_timestamp - oldest_timestamp) & 0xFFFFFFFF
+        self.impact_events = deque(
+            event
+            for event in self.impact_events
+            if self._event_is_visible_or_newer(event.timestamp_us, latest_timestamp, window_us)
+        )
+
+    @staticmethod
+    def _event_is_visible_or_newer(timestamp_us: int, latest_timestamp_us: int, window_us: int) -> bool:
+        age_us = (latest_timestamp_us - timestamp_us) & 0xFFFFFFFF
+        return age_us <= window_us or age_us > 0x7FFFFFFF

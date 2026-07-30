@@ -67,6 +67,7 @@ class CalibrationRoot(BoxLayout):
         if self._device_id is not None:
             try:
                 self.backend.connect(self._device_id, 921600)
+                self.controller.reset_session()
                 self.backend.write(encode_frame(CAL_CMD_GET_METADATA, b""))
                 self.reader.start()
             except UsbPermissionPendingError:
@@ -82,10 +83,10 @@ class CalibrationRoot(BoxLayout):
         if self.reader.error is not None:
             self.status_text = f"Disconnected: {self.reader.error}"
             return
-        config, samples, host_sequence_gaps = self.controller.model.graph_snapshot()
+        config, samples, impact_events, host_sequence_gaps = self.controller.model.graph_snapshot()
         if config is not None:
-            self.status_text = f"{config.axis_label} axis, ±{config.range_g} g, drops {self.controller.firmware_status.samples_dropped}, gaps {host_sequence_gaps}"
-            self.ids.graph.render(config, samples)
+            self.status_text = f"{config.axis_label} axis, graph ±{config.display_range_g:g} g, drops {self.controller.firmware_status.samples_dropped}, gaps {host_sequence_gaps}"
+            self.ids.graph.render(config, samples, impact_events)
 
 
 class CalibrationApp(App):

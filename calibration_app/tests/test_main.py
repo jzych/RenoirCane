@@ -6,7 +6,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from main import CalibrationApp, CalibrationRoot
-from app.model import GraphConfig, Sample
+from app.model import GraphConfig, ImpactEvent, Sample
 from app.protocol import CAL_CMD_GET_METADATA, encode_frame
 from app.serial_backends.base import SerialDevice
 
@@ -30,8 +30,8 @@ class FakeBackend:
 
 
 class GraphRecorder:
-    def render(self, config, samples):
-        self.received = config, samples
+    def render(self, config, samples, impact_events):
+        self.received = config, samples, impact_events
 
 
 class CalibrationAppTests(TestCase):
@@ -94,19 +94,20 @@ class CalibrationAppTests(TestCase):
         self.assertEqual(backend.writes, [encode_frame(CAL_CMD_GET_METADATA, b"")])
         root.reader.start.assert_called_once_with()
 
-    def test_refresh_renders_the_model_snapshot_not_live_samples(self):
-        config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
-        samples = (Sample(1, 10, 1, 2, 3),)
-        root = CalibrationRoot()
-        root.reader = SimpleNamespace(error=None)
-        root.controller.model = SimpleNamespace(
-            graph_snapshot=lambda: (config, samples, 7)
-        )
-        root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
-        recorder = GraphRecorder()
-        root.ids["graph"] = recorder
+def test_refresh_renders_the_model_snapshot_not_live_samples(self):
+    config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
+    samples = (Sample(1, 10, 1, 2, 3),)
+    impact_events = (ImpactEvent(10, "processed"),)
+    root = CalibrationRoot()
+    root.reader = SimpleNamespace(error=None)
+    root.controller.model = SimpleNamespace(
+        graph_snapshot=lambda: (config, samples, impact_events, 7)
+    )
+    root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
+    recorder = GraphRecorder()
+    root.ids["graph"] = recorder
 
-        root.refresh(0)
+    root.refresh(0)
 
-        self.assertEqual(recorder.received, (config, samples))
-        self.assertTrue(root.status_text.endswith("gaps 7"))
+    assert recorder.received == (config, samples, impact_events)
+    assert root.status_text.endswith("gaps 7")

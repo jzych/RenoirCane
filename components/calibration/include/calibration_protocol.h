@@ -15,8 +15,14 @@ typedef enum {
     CAL_PKT_SAMPLE_BATCH = 0x02,
     CAL_PKT_STATUS = 0x03,
     CAL_PKT_ERROR = 0x04,
+    CAL_PKT_IMPACT_EVENT = 0x05,
     CAL_CMD_GET_METADATA = 0x80,
 } calibration_packet_type_t;
+
+typedef enum {
+    CAL_IMPACT_PROCESSED = 0x01,
+    CAL_IMPACT_SKIPPED = 0x02,
+} calibration_impact_outcome_t;
 
 typedef enum {
     CAL_AXIS_X = 0,
@@ -55,6 +61,11 @@ typedef struct __attribute__((packed)) {
     uint32_t samples_dropped;
     uint32_t uptime_ms;
 } calibration_status_v1_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t timestamp_us;
+    uint8_t outcome;
+} calibration_impact_event_v1_t;
 
 typedef struct __attribute__((packed)) {
     uint16_t error_code;

@@ -4,7 +4,15 @@ from dataclasses import dataclass
 import struct
 
 from app.model import CalibrationModel, Sample
-from app.protocol import CAL_PKT_METADATA, CAL_PKT_SAMPLE_BATCH, CAL_PKT_STATUS, Packet
+from app.protocol import (
+    CAL_IMPACT_PROCESSED,
+    CAL_IMPACT_SKIPPED,
+    CAL_PKT_IMPACT_EVENT,
+    CAL_PKT_METADATA,
+    CAL_PKT_SAMPLE_BATCH,
+    CAL_PKT_STATUS,
+    Packet,
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +29,11 @@ class CalibrationController:
         self.firmware_status = FirmwareStatus()
         self.bad_payload_count = 0
 
+    def reset_session(self) -> None:
+        self.model = CalibrationModel()
+        self.firmware_status = FirmwareStatus()
+        self.bad_payload_count = 0
+
     def handle_packet(self, packet: Packet) -> None:
         try:
             if packet.packet_type == CAL_PKT_METADATA:
@@ -29,6 +42,18 @@ class CalibrationController:
                 self.model.append_samples(self._decode_samples(packet.payload))
             elif packet.packet_type == CAL_PKT_STATUS:
                 self.firmware_status = FirmwareStatus(*struct.unpack("<IIII", packet.payload))
+            elif packet.packet_type == CAL_PKT_IMPACT_EVENT:
+                timestamp_us, outcome = struct.unpack("<IB", packet.payload)
+                outcome_name = {
+                    CAL_IMPACT_PROCESSED: "processed",
+                    CAL_IMPACT_SKIPPED: "skipped",
+                }.get(outcome)
+                if outcome_name is None:
+                    raise ValueError("invalid impact outcome")
+                self.model.record_impact_event(
+                    timestamp_us,
+                    outcome_name,
+                )
         except (IndexError, struct.error, ValueError):
             self.bad_payload_count += 1
 

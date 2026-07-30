@@ -4,3 +4,4 @@
 
 bool calibration_stream_start(void);
 void calibration_stream_on_data_ready_from_isr(void);
+void calibration_stream_on_impact_from_isr(void);

@@ -2,23 +2,31 @@
 
 #include "app_config.h"
 #include "accelerometer.h"
+#include "audio.h"
 #include "calibration_protocol.h"
+#include "impact.h"
 #include "driver/uart.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define CALIBRATION_QUEUE_CAPACITY 128U
+#define CALIBRATION_IMPACT_QUEUE_CAPACITY 32U
 #define CALIBRATION_UART_BAUD_RATE 921600U
 
 static QueueHandle_t s_sample_queue;
+static QueueHandle_t s_impact_event_queue;
+static SemaphoreHandle_t s_accelerometer_mutex;
 static TaskHandle_t s_sample_task;
+static TaskHandle_t s_impact_task;
 static uint32_t s_next_sequence;
 static uint32_t s_samples_acquired;
 static uint32_t s_samples_transmitted;
 static uint32_t s_samples_dropped;
+static int64_t s_audio_busy_until_us;
 
 static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payload_length);
 
@@ -54,7 +62,10 @@ static void sample_task(void *arg) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         accel_sample_t raw;
-        if (!accelerometer_read_sample(&raw)) continue;
+        if (xSemaphoreTake(s_accelerometer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) continue;
+        bool sample_read = accelerometer_read_sample(&raw);
+        xSemaphoreGive(s_accelerometer_mutex);
+        if (!sample_read) continue;
         calibration_sample_t sample = {
             .seq = s_next_sequence++,
             .timestamp_us = (uint32_t)raw.timestamp_us,
@@ -64,6 +75,34 @@ static void sample_task(void *arg) {
         };
         ++s_samples_acquired;
         if (xQueueSend(s_sample_queue, &sample, 0U) != pdPASS) ++s_samples_dropped;
+    }
+}
+
+static void impact_task(void *arg) {
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (xSemaphoreTake(s_accelerometer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) continue;
+        bool tap_candidate = accelerometer_read_impact_status();
+        accelerometer_clear_interrupt();
+        accel_sample_t sample;
+        bool sample_read = tap_candidate && accelerometer_read_sample(&sample);
+        xSemaphoreGive(s_accelerometer_mutex);
+        if (!sample_read) continue;
+
+        impact_event_t candidate;
+        impact_candidate_result_t result = impact_classify_candidate(&sample, sample.timestamp_us, &candidate);
+        if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) continue;
+
+        calibration_impact_event_v1_t event = {
+            .timestamp_us = (uint32_t)candidate.timestamp_us,
+            .outcome = CAL_IMPACT_SKIPPED,
+        };
+        if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
+            impact_mark_accepted(candidate.timestamp_us);
+            event.outcome = CAL_IMPACT_PROCESSED;
+        }
+        (void)xQueueSend(s_impact_event_queue, &event, portMAX_DELAY);
     }
 }
 
@@ -91,6 +130,10 @@ static void transport_task(void *arg) {
             size_t bytes = sizeof(batch.count) + ((size_t)batch.count * sizeof(batch.samples[0]));
             if (write_packet(CAL_PKT_SAMPLE_BATCH, &batch, (uint16_t)bytes)) s_samples_transmitted += batch.count;
         }
+        calibration_impact_event_v1_t impact_event;
+        while (xQueueReceive(s_impact_event_queue, &impact_event, 0U) == pdPASS) {
+            (void)write_packet(CAL_PKT_IMPACT_EVENT, &impact_event, sizeof(impact_event));
+        }
         if ((xTaskGetTickCount() - last_status_tick) >= pdMS_TO_TICKS(1000)) {
             calibration_status_v1_t status = {
                 .samples_acquired = s_samples_acquired,
@@ -106,15 +149,24 @@ static void transport_task(void *arg) {
 
 bool calibration_stream_start(void) {
     s_sample_queue = xQueueCreate(CALIBRATION_QUEUE_CAPACITY, sizeof(calibration_sample_t));
-    if (s_sample_queue == NULL) return false;
+    s_impact_event_queue = xQueueCreate(CALIBRATION_IMPACT_QUEUE_CAPACITY, sizeof(calibration_impact_event_v1_t));
+    s_accelerometer_mutex = xSemaphoreCreateMutex();
+    if (s_sample_queue == NULL || s_impact_event_queue == NULL || s_accelerometer_mutex == NULL) return false;
     if (!uart_is_driver_installed(UART_NUM_0) && uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0) != ESP_OK) return false;
     if (uart_set_baudrate(UART_NUM_0, CALIBRATION_UART_BAUD_RATE) != ESP_OK) return false;
     if (xTaskCreate(sample_task, "cal_sample", 3072U, NULL, 8U, &s_sample_task) != pdPASS) return false;
+    if (xTaskCreate(impact_task, "cal_impact", 3072U, NULL, 8U, &s_impact_task) != pdPASS) return false;
     return xTaskCreate(transport_task, "cal_transport", 4096U, NULL, 7U, NULL) == pdPASS;
 }
 
 void IRAM_ATTR calibration_stream_on_data_ready_from_isr(void) {
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_sample_task != NULL) vTaskNotifyGiveFromISR(s_sample_task, &higher_priority_task_woken);
+    if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
+}
+
+void IRAM_ATTR calibration_stream_on_impact_from_isr(void) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (s_impact_task != NULL) vTaskNotifyGiveFromISR(s_impact_task, &higher_priority_task_woken);
     if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
 }
