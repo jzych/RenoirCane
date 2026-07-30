@@ -38,7 +38,7 @@ class CalibrationGraph(Widget):
         )
         with self.canvas:
             for event, event_offset_us in zip(visible_events, visible_event_offsets):
-                Color(*(0.25, 0.9, 0.35, 0.35) if event.outcome == "processed" else (1.0, 0.85, 0.1, 0.35))
+                Color(*(0.25, 0.9, 0.35, 1.0) if event.outcome == "processed" else (1.0, 0.85, 0.1, 0.35))
                 x = event_offset_us * self.width / span + self.x
                 Line(points=[x, self.y, x, self.top], width=1.4)
             Color(0.35, 0.75, 1.0, 1.0)

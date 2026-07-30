@@ -5,7 +5,7 @@ from types import ModuleType
 from app.model import GraphConfig, ImpactEvent, Sample
 
 
-def test_impact_markers_are_translucent_and_drawn_before_the_acceleration_trace(monkeypatch):
+def test_impact_markers_use_outcome_specific_opacity_and_draw_before_the_acceleration_trace(monkeypatch):
     instructions = []
 
     class FakeCanvas:
@@ -54,13 +54,15 @@ def test_impact_markers_are_translucent_and_drawn_before_the_acceleration_trace(
     graph.render(
         GraphConfig("Y", 16, 24_000, 2.928, 0.488),
         (Sample(1, 100, 0, 6000, 0),),
-        (ImpactEvent(100, "processed"),),
+        (ImpactEvent(100, "processed"), ImpactEvent(100, "skipped")),
     )
 
-    marker_color = ("color", (0.25, 0.9, 0.35, 0.35))
+    marker_color = ("color", (0.25, 0.9, 0.35, 1.0))
+    skipped_marker_color = ("color", (1.0, 0.85, 0.1, 0.35))
     marker_line = ("line", {"points": [0.0, 0, 0.0, 100], "width": 1.4})
     trace_color = ("color", (0.35, 0.75, 1.0, 1.0))
     assert marker_color in instructions
+    assert skipped_marker_color in instructions
     assert marker_line in instructions
     assert trace_color in instructions
-    assert instructions.index(marker_color) < instructions.index(marker_line) < instructions.index(trace_color)
+    assert instructions.index(marker_color) < instructions.index(skipped_marker_color) < instructions.index(trace_color)
