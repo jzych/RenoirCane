@@ -90,6 +90,21 @@ void test_impact_classifier_distinguishes_refractory_skips_from_threshold_reject
                       impact_classify_candidate(&refractory_sample, refractory_sample.timestamp_us, &event));
 }
 
+void test_impact_classifier_accepts_the_initial_candidate_without_timestamp_underflow(void) {
+    impact_config_t config = {
+        .axis = APP_IMPACT_AXIS_Y,
+        .threshold_raw = 6000,
+        .refractory_ms = 200,
+    };
+    accel_sample_t initial_sample = {.y = 6000, .timestamp_us = 1};
+    impact_event_t event;
+
+    impact_init(&config);
+
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
+                      impact_classify_candidate(&initial_sample, initial_sample.timestamp_us, &event));
+}
+
 void test_impact_classifier_accepts_exact_threshold_and_signed_saturation(void) {
     impact_config_t config = {
         .axis = APP_IMPACT_AXIS_Y,
@@ -209,6 +224,7 @@ void app_main(void) {
     RUN_TEST(test_impact_event_packet_round_trip_preserves_timestamp_and_outcome);
     RUN_TEST(test_impact_telemetry_packet_round_trip_preserves_all_counters);
     RUN_TEST(test_impact_classifier_distinguishes_refractory_skips_from_threshold_rejection);
+    RUN_TEST(test_impact_classifier_accepts_the_initial_candidate_without_timestamp_underflow);
     RUN_TEST(test_impact_classifier_accepts_exact_threshold_and_signed_saturation);
     RUN_TEST(test_impact_threshold_crossing_emits_once_until_the_signal_drops_below_threshold);
     RUN_TEST(test_impact_threshold_crossing_preserves_refractory_skip_outcomes);
