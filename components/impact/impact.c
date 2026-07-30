@@ -4,6 +4,7 @@
 
 static impact_config_t s_config;
 static int64_t s_last_accepted_us = INT64_MIN;
+static bool s_selected_axis_above_threshold;
 
 static int16_t selected_axis(const accel_sample_t *sample) {
     switch (s_config.axis) {
@@ -14,17 +15,37 @@ static int16_t selected_axis(const accel_sample_t *sample) {
     }
 }
 
-void impact_init(const impact_config_t *config) { s_config = *config; s_last_accepted_us = INT64_MIN; }
+static uint32_t selected_axis_magnitude(const accel_sample_t *sample) {
+    int32_t raw = selected_axis(sample);
+    return (uint32_t)(raw < 0 ? -raw : raw);
+}
+
+void impact_init(const impact_config_t *config) {
+    s_config = *config;
+    s_last_accepted_us = INT64_MIN;
+    s_selected_axis_above_threshold = false;
+}
+
+bool impact_sample_exceeds_threshold(const accel_sample_t *sample) {
+    return selected_axis_magnitude(sample) >= (uint32_t)s_config.threshold_raw;
+}
 
 impact_candidate_result_t impact_classify_candidate(const accel_sample_t *sample, int64_t now_us, impact_event_t *event) {
-    int32_t raw = selected_axis(sample);
-    uint32_t magnitude = (uint32_t)(raw < 0 ? -raw : raw);
-    if (magnitude < (uint32_t)s_config.threshold_raw) return IMPACT_CANDIDATE_BELOW_THRESHOLD;
+    uint32_t magnitude = selected_axis_magnitude(sample);
+    if (!impact_sample_exceeds_threshold(sample)) return IMPACT_CANDIDATE_BELOW_THRESHOLD;
     event->timestamp_us = now_us;
     event->sample = *sample;
     event->axis_abs_raw = magnitude;
     if (now_us - s_last_accepted_us < (int64_t)s_config.refractory_ms * 1000) return IMPACT_CANDIDATE_REFRACTORY;
     return IMPACT_CANDIDATE_PROCESSED;
+}
+
+impact_candidate_result_t impact_classify_threshold_crossing(const accel_sample_t *sample, int64_t now_us, impact_event_t *event) {
+    bool above_threshold = impact_sample_exceeds_threshold(sample);
+    bool is_new_crossing = above_threshold && !s_selected_axis_above_threshold;
+    s_selected_axis_above_threshold = above_threshold;
+    if (!is_new_crossing) return IMPACT_CANDIDATE_BELOW_THRESHOLD;
+    return impact_classify_candidate(sample, now_us, event);
 }
 
 bool impact_claim_candidate_for_audio(impact_candidate_result_t result, int64_t timestamp_us, uint32_t audio_duration_us, int64_t *audio_busy_until_us) {

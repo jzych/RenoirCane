@@ -97,6 +97,28 @@ static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payl
     return length != 0U && uart_write_bytes(UART_NUM_0, encoded, length) == (int)length;
 }
 
+static void emit_impact_outcome(const accel_sample_t *sample) {
+    impact_event_t candidate;
+    impact_candidate_result_t result = impact_classify_threshold_crossing(sample, sample->timestamp_us, &candidate);
+    if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) return;
+
+    calibration_impact_event_v1_t event = {
+        .timestamp_us = (uint32_t)candidate.timestamp_us,
+        .outcome = CAL_IMPACT_SKIPPED,
+    };
+    if (result == IMPACT_CANDIDATE_REFRACTORY) {
+        impact_telemetry_increment(&s_impact_telemetry.refractory_skipped);
+    } else if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
+        impact_mark_accepted(candidate.timestamp_us);
+        event.outcome = CAL_IMPACT_PROCESSED;
+    } else {
+        impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
+    }
+    if (xQueueSend(s_impact_event_queue, &event, 0U) != pdPASS) {
+        impact_telemetry_increment(&s_impact_telemetry.event_queue_dropped);
+    }
+}
+
 static void sample_task(void *arg) {
     (void)arg;
     for (;;) {
@@ -106,6 +128,7 @@ static void sample_task(void *arg) {
         bool sample_read = accelerometer_read_sample(&raw);
         xSemaphoreGive(s_accelerometer_mutex);
         if (!sample_read) continue;
+        emit_impact_outcome(&raw);
         calibration_sample_t sample = {
             .seq = s_next_sequence++,
             .timestamp_us = (uint32_t)raw.timestamp_us,
@@ -129,29 +152,8 @@ static void impact_task(void *arg) {
         accel_sample_t sample;
         bool sample_read = tap_candidate && accelerometer_read_sample(&sample);
         xSemaphoreGive(s_accelerometer_mutex);
-        if (!sample_read) continue;
-
-        impact_event_t candidate;
-        impact_candidate_result_t result = impact_classify_candidate(&sample, sample.timestamp_us, &candidate);
-        if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) {
+        if (sample_read && !impact_sample_exceeds_threshold(&sample)) {
             impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
-            continue;
-        }
-
-        calibration_impact_event_v1_t event = {
-            .timestamp_us = (uint32_t)candidate.timestamp_us,
-            .outcome = CAL_IMPACT_SKIPPED,
-        };
-        if (result == IMPACT_CANDIDATE_REFRACTORY) {
-            impact_telemetry_increment(&s_impact_telemetry.refractory_skipped);
-        } else if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
-            impact_mark_accepted(candidate.timestamp_us);
-            event.outcome = CAL_IMPACT_PROCESSED;
-        } else {
-            impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
-        }
-        if (xQueueSend(s_impact_event_queue, &event, 0U) != pdPASS) {
-            impact_telemetry_increment(&s_impact_telemetry.event_queue_dropped);
         }
     }
 }

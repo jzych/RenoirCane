@@ -98,15 +98,84 @@ void test_impact_classifier_accepts_exact_threshold_and_signed_saturation(void) 
     };
     const int16_t candidates[] = {6000, -6000, INT16_MAX, INT16_MIN};
     const uint32_t expected_magnitudes[] = {6000U, 6000U, 32767U, 32768U};
+    accel_sample_t below_threshold = {.y = 5999, .timestamp_us = 999999};
     impact_event_t event;
 
     impact_init(&config);
+    TEST_ASSERT_FALSE(impact_sample_exceeds_threshold(&below_threshold));
     for (size_t index = 0; index < sizeof(candidates) / sizeof(candidates[0]); ++index) {
         accel_sample_t sample = {.y = candidates[index], .timestamp_us = 1000000 + (int64_t)index};
+        TEST_ASSERT_TRUE(impact_sample_exceeds_threshold(&sample));
         TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
                           impact_classify_candidate(&sample, sample.timestamp_us, &event));
         TEST_ASSERT_EQUAL_UINT32(expected_magnitudes[index], event.axis_abs_raw);
     }
+}
+
+void test_impact_threshold_crossing_emits_once_until_the_signal_drops_below_threshold(void) {
+    impact_config_t config = {
+        .axis = APP_IMPACT_AXIS_Y,
+        .threshold_raw = 6000,
+        .refractory_ms = 200,
+    };
+    impact_event_t event;
+    accel_sample_t below = {.y = 5999, .timestamp_us = 1000000};
+    accel_sample_t crossing = {.y = 6000, .timestamp_us = 1010000};
+    accel_sample_t held_above = {.y = INT16_MAX, .timestamp_us = 1300000};
+    accel_sample_t dropped_below = {.y = 5999, .timestamp_us = 1310000};
+    accel_sample_t rearmed_crossing = {.y = 6000, .timestamp_us = 1320000};
+
+    impact_init(&config);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_classify_threshold_crossing(&below, below.timestamp_us, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
+                      impact_classify_threshold_crossing(&crossing, crossing.timestamp_us, &event));
+    impact_mark_accepted(crossing.timestamp_us);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_classify_threshold_crossing(&held_above, held_above.timestamp_us, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_classify_threshold_crossing(&dropped_below, dropped_below.timestamp_us, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
+                      impact_classify_threshold_crossing(&rearmed_crossing, rearmed_crossing.timestamp_us, &event));
+}
+
+void test_impact_threshold_crossing_preserves_refractory_skip_outcomes(void) {
+    impact_config_t config = {
+        .axis = APP_IMPACT_AXIS_Y,
+        .threshold_raw = 6000,
+        .refractory_ms = 200,
+    };
+    impact_event_t event;
+    accel_sample_t first_crossing = {.y = 6000, .timestamp_us = 1000000};
+    accel_sample_t below = {.y = 5999, .timestamp_us = 1050000};
+    accel_sample_t second_crossing = {.y = 6000, .timestamp_us = 1100000};
+
+    impact_init(&config);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
+                      impact_classify_threshold_crossing(&first_crossing, first_crossing.timestamp_us, &event));
+    impact_mark_accepted(first_crossing.timestamp_us);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_classify_threshold_crossing(&below, below.timestamp_us, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_REFRACTORY,
+                      impact_classify_threshold_crossing(&second_crossing, second_crossing.timestamp_us, &event));
+}
+
+void test_impact_threshold_crossing_detects_negative_saturation_after_rearming(void) {
+    impact_config_t config = {
+        .axis = APP_IMPACT_AXIS_Y,
+        .threshold_raw = 6000,
+        .refractory_ms = 200,
+    };
+    impact_event_t event;
+    accel_sample_t below = {.y = 5999, .timestamp_us = 1000000};
+    accel_sample_t negative_saturation = {.y = INT16_MIN, .timestamp_us = 1001000};
+
+    impact_init(&config);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_classify_threshold_crossing(&below, below.timestamp_us, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED,
+                      impact_classify_threshold_crossing(&negative_saturation, negative_saturation.timestamp_us, &event));
+    TEST_ASSERT_EQUAL_UINT32(32768U, event.axis_abs_raw);
 }
 
 void test_audio_impact_duration_is_available_for_calibration_timing(void) {
@@ -141,6 +210,9 @@ void app_main(void) {
     RUN_TEST(test_impact_telemetry_packet_round_trip_preserves_all_counters);
     RUN_TEST(test_impact_classifier_distinguishes_refractory_skips_from_threshold_rejection);
     RUN_TEST(test_impact_classifier_accepts_exact_threshold_and_signed_saturation);
+    RUN_TEST(test_impact_threshold_crossing_emits_once_until_the_signal_drops_below_threshold);
+    RUN_TEST(test_impact_threshold_crossing_preserves_refractory_skip_outcomes);
+    RUN_TEST(test_impact_threshold_crossing_detects_negative_saturation_after_rearming);
     RUN_TEST(test_audio_impact_duration_is_available_for_calibration_timing);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
     RUN_TEST(test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration);
