@@ -2,8 +2,9 @@
 
 #include "app_config.h"
 #include "accelerometer.h"
-#include "audio.h"
 #include "calibration_protocol.h"
+#include "calibration_playback.h"
+#include "bluetooth_audio.h"
 #include "impact.h"
 #include "driver/uart.h"
 #include "esp_attr.h"
@@ -36,7 +37,6 @@ static uint32_t s_next_sequence;
 static uint32_t s_samples_acquired;
 static uint32_t s_samples_transmitted;
 static uint32_t s_samples_dropped;
-static int64_t s_audio_busy_until_us;
 static impact_telemetry_counters_t s_impact_telemetry;
 static portMUX_TYPE s_impact_telemetry_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -108,11 +108,13 @@ static void emit_impact_outcome(const accel_sample_t *sample) {
     };
     if (result == IMPACT_CANDIDATE_REFRACTORY) {
         impact_telemetry_increment(&s_impact_telemetry.refractory_skipped);
-    } else if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
-        impact_mark_accepted(candidate.timestamp_us);
-        event.outcome = CAL_IMPACT_PROCESSED;
     } else {
-        impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
+        impact_mark_accepted(candidate.timestamp_us);
+        calibration_playback_outcome_t playback = calibration_playback_map_result(bluetooth_audio_start_impact());
+        event.outcome = playback.outcome;
+        if (playback.audio_busy_skipped) {
+            impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
+        }
     }
     if (xQueueSend(s_impact_event_queue, &event, 0U) != pdPASS) {
         impact_telemetry_increment(&s_impact_telemetry.event_queue_dropped);

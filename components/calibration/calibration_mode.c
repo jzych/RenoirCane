@@ -5,6 +5,7 @@
 #include "accelerometer.h"
 #include "audio.h"
 #include "app_config.h"
+#include "bluetooth_audio.h"
 #include "calibration_stream.h"
 #include "esp_log.h"
 #include "impact.h"
@@ -12,10 +13,34 @@
 
 static const char *TAG = "CAL_MODE";
 
+static void bluetooth_state_changed(bt_audio_state_t state) {
+    switch (state) {
+        case BT_AUDIO_CONNECTING:
+            status_led_set(STATUS_LED_BT_CONNECTING);
+            break;
+        case BT_AUDIO_CONNECTED:
+            status_led_set(STATUS_LED_READY);
+            break;
+        case BT_AUDIO_STREAMING:
+            status_led_set(STATUS_LED_PLAYING);
+            break;
+        case BT_AUDIO_ERROR:
+            status_led_set(STATUS_LED_ERROR);
+            break;
+        case BT_AUDIO_DISABLED:
+            break;
+    }
+}
+
 void calibration_mode_start(void) {
     status_led_init();
     status_led_set(STATUS_LED_BOOT);
     audio_init();
+    if (bluetooth_audio_init(bluetooth_state_changed)) {
+        bluetooth_audio_start();
+    } else {
+        status_led_set(STATUS_LED_ERROR);
+    }
     impact_config_t impact_config = {
         .axis = APP_IMPACT_ACTIVE_AXIS,
         .threshold_raw = APP_IMPACT_THRESHOLD_RAW,

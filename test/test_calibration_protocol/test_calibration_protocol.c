@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "audio.h"
+#include "calibration_playback.h"
 #include "bluetooth_audio_policy.h"
 #include "calibration_protocol.h"
 #include "impact.h"
@@ -215,7 +216,7 @@ void test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playb
 
     TEST_ASSERT_TRUE(impact_claim_candidate_for_audio(
         IMPACT_CANDIDATE_PROCESSED, 1000000, 500000, &audio_busy_until_us));
-    TEST_ASSERT_EQUAL_INT64(1500000, audio_busy_until_us);
+    TEST_ASSERT_EQUAL_INT32(1500000, audio_busy_until_us);
     TEST_ASSERT_FALSE(impact_claim_candidate_for_audio(
         IMPACT_CANDIDATE_PROCESSED, 1300000, 500000, &audio_busy_until_us));
     TEST_ASSERT_TRUE(impact_claim_candidate_for_audio(
@@ -260,6 +261,22 @@ void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconne
     TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 10000001));
 }
 
+void test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped(void) {
+    calibration_playback_outcome_t started = calibration_playback_map_result(BT_AUDIO_PLAY_STARTED);
+    calibration_playback_outcome_t busy = calibration_playback_map_result(BT_AUDIO_PLAY_BUSY);
+    calibration_playback_outcome_t disconnected = calibration_playback_map_result(BT_AUDIO_PLAY_DISCONNECTED);
+    calibration_playback_outcome_t error = calibration_playback_map_result(BT_AUDIO_PLAY_ERROR);
+
+    TEST_ASSERT_EQUAL(CAL_IMPACT_PROCESSED, started.outcome);
+    TEST_ASSERT_FALSE(started.audio_busy_skipped);
+    TEST_ASSERT_EQUAL(CAL_IMPACT_SKIPPED, busy.outcome);
+    TEST_ASSERT_TRUE(busy.audio_busy_skipped);
+    TEST_ASSERT_EQUAL(CAL_IMPACT_SKIPPED, disconnected.outcome);
+    TEST_ASSERT_FALSE(disconnected.audio_busy_skipped);
+    TEST_ASSERT_EQUAL(CAL_IMPACT_SKIPPED, error.outcome);
+    TEST_ASSERT_FALSE(error.audio_busy_skipped);
+}
+
 void app_main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_cobs_round_trip_preserves_zero_bytes);
@@ -279,5 +296,6 @@ void app_main(void) {
     RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
     RUN_TEST(test_bluetooth_policy_stops_requesting_after_a_connection_callback);
     RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
+    RUN_TEST(test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped);
     UNITY_END();
 }
