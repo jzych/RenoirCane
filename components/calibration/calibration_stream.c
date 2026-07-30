@@ -17,6 +17,16 @@
 #define CALIBRATION_IMPACT_QUEUE_CAPACITY 32U
 #define CALIBRATION_UART_BAUD_RATE 921600U
 
+typedef struct {
+    uint32_t int1_received;
+    uint32_t tap_confirmed;
+    uint32_t threshold_rejected;
+    uint32_t refractory_skipped;
+    uint32_t audio_busy_skipped;
+    uint32_t event_packets_sent;
+    uint32_t event_queue_dropped;
+} impact_telemetry_counters_t;
+
 static QueueHandle_t s_sample_queue;
 static QueueHandle_t s_impact_event_queue;
 static SemaphoreHandle_t s_accelerometer_mutex;
@@ -27,8 +37,38 @@ static uint32_t s_samples_acquired;
 static uint32_t s_samples_transmitted;
 static uint32_t s_samples_dropped;
 static int64_t s_audio_busy_until_us;
+static impact_telemetry_counters_t s_impact_telemetry;
+static portMUX_TYPE s_impact_telemetry_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payload_length);
+
+static void impact_telemetry_increment(uint32_t *counter) {
+    portENTER_CRITICAL(&s_impact_telemetry_lock);
+    ++*counter;
+    portEXIT_CRITICAL(&s_impact_telemetry_lock);
+}
+
+static void IRAM_ATTR impact_telemetry_increment_from_isr(uint32_t *counter) {
+    portENTER_CRITICAL_ISR(&s_impact_telemetry_lock);
+    ++*counter;
+    portEXIT_CRITICAL_ISR(&s_impact_telemetry_lock);
+}
+
+static calibration_impact_telemetry_v1_t impact_telemetry_snapshot(void) {
+    impact_telemetry_counters_t counters;
+    portENTER_CRITICAL(&s_impact_telemetry_lock);
+    counters = s_impact_telemetry;
+    portEXIT_CRITICAL(&s_impact_telemetry_lock);
+    return (calibration_impact_telemetry_v1_t){
+        .int1_received = counters.int1_received,
+        .tap_confirmed = counters.tap_confirmed,
+        .threshold_rejected = counters.threshold_rejected,
+        .refractory_skipped = counters.refractory_skipped,
+        .audio_busy_skipped = counters.audio_busy_skipped,
+        .event_packets_sent = counters.event_packets_sent,
+        .event_queue_dropped = counters.event_queue_dropped,
+    };
+}
 
 static void process_commands(const calibration_metadata_v1_t *metadata) {
     static uint8_t frame[CALIBRATION_MAX_ENCODED_PACKET];
@@ -85,6 +125,7 @@ static void impact_task(void *arg) {
         if (xSemaphoreTake(s_accelerometer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) continue;
         bool tap_candidate = accelerometer_read_impact_status();
         accelerometer_clear_interrupt();
+        if (tap_candidate) impact_telemetry_increment(&s_impact_telemetry.tap_confirmed);
         accel_sample_t sample;
         bool sample_read = tap_candidate && accelerometer_read_sample(&sample);
         xSemaphoreGive(s_accelerometer_mutex);
@@ -92,17 +133,26 @@ static void impact_task(void *arg) {
 
         impact_event_t candidate;
         impact_candidate_result_t result = impact_classify_candidate(&sample, sample.timestamp_us, &candidate);
-        if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) continue;
+        if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) {
+            impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
+            continue;
+        }
 
         calibration_impact_event_v1_t event = {
             .timestamp_us = (uint32_t)candidate.timestamp_us,
             .outcome = CAL_IMPACT_SKIPPED,
         };
-        if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
+        if (result == IMPACT_CANDIDATE_REFRACTORY) {
+            impact_telemetry_increment(&s_impact_telemetry.refractory_skipped);
+        } else if (impact_claim_candidate_for_audio(result, candidate.timestamp_us, audio_impact_duration_us(), &s_audio_busy_until_us)) {
             impact_mark_accepted(candidate.timestamp_us);
             event.outcome = CAL_IMPACT_PROCESSED;
+        } else {
+            impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
         }
-        (void)xQueueSend(s_impact_event_queue, &event, portMAX_DELAY);
+        if (xQueueSend(s_impact_event_queue, &event, 0U) != pdPASS) {
+            impact_telemetry_increment(&s_impact_telemetry.event_queue_dropped);
+        }
     }
 }
 
@@ -132,7 +182,9 @@ static void transport_task(void *arg) {
         }
         calibration_impact_event_v1_t impact_event;
         while (xQueueReceive(s_impact_event_queue, &impact_event, 0U) == pdPASS) {
-            (void)write_packet(CAL_PKT_IMPACT_EVENT, &impact_event, sizeof(impact_event));
+            if (write_packet(CAL_PKT_IMPACT_EVENT, &impact_event, sizeof(impact_event))) {
+                impact_telemetry_increment(&s_impact_telemetry.event_packets_sent);
+            }
         }
         if ((xTaskGetTickCount() - last_status_tick) >= pdMS_TO_TICKS(1000)) {
             calibration_status_v1_t status = {
@@ -142,6 +194,8 @@ static void transport_task(void *arg) {
                 .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000LL),
             };
             (void)write_packet(CAL_PKT_STATUS, &status, sizeof(status));
+            calibration_impact_telemetry_v1_t telemetry = impact_telemetry_snapshot();
+            (void)write_packet(CAL_PKT_IMPACT_TELEMETRY, &telemetry, sizeof(telemetry));
             last_status_tick = xTaskGetTickCount();
         }
     }
@@ -167,6 +221,7 @@ void IRAM_ATTR calibration_stream_on_data_ready_from_isr(void) {
 
 void IRAM_ATTR calibration_stream_on_impact_from_isr(void) {
     BaseType_t higher_priority_task_woken = pdFALSE;
+    impact_telemetry_increment_from_isr(&s_impact_telemetry.int1_received);
     if (s_impact_task != NULL) vTaskNotifyGiveFromISR(s_impact_task, &higher_priority_task_woken);
     if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
 }

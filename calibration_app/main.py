@@ -85,7 +85,15 @@ class CalibrationRoot(BoxLayout):
             return
         config, samples, impact_events, host_sequence_gaps = self.controller.model.graph_snapshot()
         if config is not None:
-            self.status_text = f"{config.axis_label} axis, graph ±{config.display_range_g:g} g, drops {self.controller.firmware_status.samples_dropped}, gaps {host_sequence_gaps}"
+            telemetry = self.controller.impact_telemetry
+            self.status_text = (
+                f"{config.axis_label} axis, graph ±{config.display_range_g:g} g, "
+                f"drops {self.controller.firmware_status.samples_dropped}, gaps {host_sequence_gaps}; "
+                f"irq {telemetry.int1_received}, tap {telemetry.tap_confirmed}, "
+                f"threshold {telemetry.threshold_rejected}, refractory {telemetry.refractory_skipped}, "
+                f"busy {telemetry.audio_busy_skipped}, sent {telemetry.event_packets_sent}, "
+                f"queue {telemetry.event_queue_dropped}"
+            )
             self.ids.graph.render(config, samples, impact_events)
 
 

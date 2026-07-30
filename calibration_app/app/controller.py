@@ -8,6 +8,7 @@ from app.protocol import (
     CAL_IMPACT_PROCESSED,
     CAL_IMPACT_SKIPPED,
     CAL_PKT_IMPACT_EVENT,
+    CAL_PKT_IMPACT_TELEMETRY,
     CAL_PKT_METADATA,
     CAL_PKT_SAMPLE_BATCH,
     CAL_PKT_STATUS,
@@ -23,15 +24,28 @@ class FirmwareStatus:
     uptime_ms: int = 0
 
 
+@dataclass(frozen=True)
+class ImpactTelemetry:
+    int1_received: int = 0
+    tap_confirmed: int = 0
+    threshold_rejected: int = 0
+    refractory_skipped: int = 0
+    audio_busy_skipped: int = 0
+    event_packets_sent: int = 0
+    event_queue_dropped: int = 0
+
+
 class CalibrationController:
     def __init__(self) -> None:
         self.model = CalibrationModel()
         self.firmware_status = FirmwareStatus()
+        self.impact_telemetry = ImpactTelemetry()
         self.bad_payload_count = 0
 
     def reset_session(self) -> None:
         self.model = CalibrationModel()
         self.firmware_status = FirmwareStatus()
+        self.impact_telemetry = ImpactTelemetry()
         self.bad_payload_count = 0
 
     def handle_packet(self, packet: Packet) -> None:
@@ -54,6 +68,8 @@ class CalibrationController:
                     timestamp_us,
                     outcome_name,
                 )
+            elif packet.packet_type == CAL_PKT_IMPACT_TELEMETRY:
+                self.impact_telemetry = ImpactTelemetry(*struct.unpack("<IIIIIII", packet.payload))
         except (IndexError, struct.error, ValueError):
             self.bad_payload_count += 1
 

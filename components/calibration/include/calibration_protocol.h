@@ -16,6 +16,7 @@ typedef enum {
     CAL_PKT_STATUS = 0x03,
     CAL_PKT_ERROR = 0x04,
     CAL_PKT_IMPACT_EVENT = 0x05,
+    CAL_PKT_IMPACT_TELEMETRY = 0x06,
     CAL_CMD_GET_METADATA = 0x80,
 } calibration_packet_type_t;
 
@@ -66,6 +67,16 @@ typedef struct __attribute__((packed)) {
     uint32_t timestamp_us;
     uint8_t outcome;
 } calibration_impact_event_v1_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t int1_received;
+    uint32_t tap_confirmed;
+    uint32_t threshold_rejected;
+    uint32_t refractory_skipped;
+    uint32_t audio_busy_skipped;
+    uint32_t event_packets_sent;
+    uint32_t event_queue_dropped;
+} calibration_impact_telemetry_v1_t;
 
 typedef struct __attribute__((packed)) {
     uint16_t error_code;

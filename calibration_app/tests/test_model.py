@@ -43,6 +43,16 @@ def test_sequence_gap_and_ring_capacity_are_metadata_driven():
     assert model.samples[-1].sequence == 32
 
 
+def test_graph_snapshot_preserves_samples_beyond_the_marked_threshold():
+    model = CalibrationModel()
+    model.apply_metadata(metadata(800, 16, 1, 6000, 0.976))
+    model.append_samples([Sample(1, 1, 0, 6001, 0)])
+
+    _config, samples, _impact_events, _gaps = model.graph_snapshot()
+
+    assert samples[-1].y_raw == 6001
+
+
 def test_graph_snapshot_copies_config_samples_events_and_gap_count():
     model = CalibrationModel()
     model.apply_metadata(metadata(1, 16, 1, 6000, 0.976))

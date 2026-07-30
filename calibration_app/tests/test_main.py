@@ -104,10 +104,26 @@ def test_refresh_renders_the_model_snapshot_not_live_samples(self):
         graph_snapshot=lambda: (config, samples, impact_events, 7)
     )
     root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
+    root.controller.impact_telemetry = SimpleNamespace(
+        int1_received=1,
+        tap_confirmed=2,
+        threshold_rejected=3,
+        refractory_skipped=4,
+        audio_busy_skipped=5,
+        event_packets_sent=6,
+        event_queue_dropped=7,
+    )
     recorder = GraphRecorder()
     root.ids["graph"] = recorder
 
     root.refresh(0)
 
     assert recorder.received == (config, samples, impact_events)
-    assert root.status_text.endswith("gaps 7")
+    assert "gaps 7" in root.status_text
+    assert "irq 1" in root.status_text
+    assert "tap 2" in root.status_text
+    assert "threshold 3" in root.status_text
+    assert "refractory 4" in root.status_text
+    assert "busy 5" in root.status_text
+    assert "sent 6" in root.status_text
+    assert "queue 7" in root.status_text

@@ -4,6 +4,7 @@ from app.controller import CalibrationController
 from app.model import Sample
 from app.protocol import (
     CAL_PKT_IMPACT_EVENT,
+    CAL_PKT_IMPACT_TELEMETRY,
     CAL_PKT_METADATA,
     CAL_PKT_SAMPLE_BATCH,
     CAL_PKT_STATUS,
@@ -52,6 +53,30 @@ def test_controller_rejects_an_impact_event_with_an_unknown_outcome():
     assert controller.bad_payload_count == 1
 
 
+def test_controller_records_impact_telemetry():
+    controller = CalibrationController()
+
+    controller.handle_packet(
+        Packet(1, CAL_PKT_IMPACT_TELEMETRY, struct.pack("<IIIIIII", 1, 2, 3, 4, 5, 6, 7))
+    )
+
+    assert controller.impact_telemetry.int1_received == 1
+    assert controller.impact_telemetry.tap_confirmed == 2
+    assert controller.impact_telemetry.threshold_rejected == 3
+    assert controller.impact_telemetry.refractory_skipped == 4
+    assert controller.impact_telemetry.audio_busy_skipped == 5
+    assert controller.impact_telemetry.event_packets_sent == 6
+    assert controller.impact_telemetry.event_queue_dropped == 7
+
+
+def test_controller_rejects_malformed_impact_telemetry():
+    controller = CalibrationController()
+
+    controller.handle_packet(Packet(1, CAL_PKT_IMPACT_TELEMETRY, b"\x00"))
+
+    assert controller.bad_payload_count == 1
+
+
 def test_controller_reset_session_discards_previous_samples_events_and_gaps():
     controller = CalibrationController()
     controller.model.apply_metadata(struct.pack("<HBBhfBBBB", 1, 16, 1, 6000, 0.976, 14, 4, 1, 0))
@@ -65,3 +90,4 @@ def test_controller_reset_session_discards_previous_samples_events_and_gaps():
     assert samples == ()
     assert impact_events == ()
     assert gaps == 0
+    assert controller.impact_telemetry.event_packets_sent == 0
