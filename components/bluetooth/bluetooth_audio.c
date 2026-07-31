@@ -360,9 +360,9 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
     if ((error = esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &io_capability, sizeof(io_capability))) != ESP_OK ||
         (error = esp_bt_gap_register_callback(gap_callback)) != ESP_OK ||
         (error = esp_bt_dev_set_device_name("Cane Audio ECU")) != ESP_OK ||
-        (error = esp_a2d_source_init()) != ESP_OK ||
         (error = esp_a2d_register_callback(a2dp_callback)) != ESP_OK ||
         (error = esp_a2d_source_register_data_callback(a2dp_data_callback)) != ESP_OK ||
+        (error = esp_a2d_source_init()) != ESP_OK ||
         (error = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE)) != ESP_OK) {
         media_error("Bluetooth profile initialization", error);
         return false;
