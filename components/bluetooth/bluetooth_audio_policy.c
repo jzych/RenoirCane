@@ -6,6 +6,9 @@ void bluetooth_audio_policy_init(bt_audio_policy_t *policy) {
     policy->state = BT_AUDIO_DISABLED;
     policy->retry_at_us = 0;
     policy->attempt_outstanding = false;
+    policy->media_streaming = false;
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->source_ready = false;
 }
 
 bool bluetooth_audio_policy_should_connect(bt_audio_policy_t *policy, int64_t now_us) {
@@ -19,13 +22,66 @@ bool bluetooth_audio_policy_should_connect(bt_audio_policy_t *policy, int64_t no
     return true;
 }
 
+bool bluetooth_audio_policy_should_keep_media_started(const bt_audio_policy_t *policy) {
+    return policy->state == BT_AUDIO_CONNECTED || policy->state == BT_AUDIO_STREAMING;
+}
+
+bt_audio_media_action_t bluetooth_audio_policy_next_media_action(bt_audio_policy_t *policy) {
+    if (policy->state != BT_AUDIO_CONNECTED || policy->media_streaming ||
+        policy->media_action_pending != BT_AUDIO_MEDIA_ACTION_NONE) {
+        return BT_AUDIO_MEDIA_ACTION_NONE;
+    }
+
+    policy->media_action_pending = policy->source_ready ? BT_AUDIO_MEDIA_ACTION_START
+                                                         : BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY;
+    return policy->media_action_pending;
+}
+
+bool bluetooth_audio_policy_on_source_ready(bt_audio_policy_t *policy, bool ready) {
+    if (policy->state != BT_AUDIO_CONNECTED ||
+        policy->media_action_pending != BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY) {
+        return false;
+    }
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->source_ready = ready;
+    return true;
+}
+
+bool bluetooth_audio_policy_on_media_start_result(bt_audio_policy_t *policy, bool started) {
+    if (policy->state != BT_AUDIO_CONNECTED || policy->media_action_pending != BT_AUDIO_MEDIA_ACTION_START) {
+        return false;
+    }
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->media_streaming = started;
+    if (!started) {
+        policy->source_ready = false;
+    }
+    return true;
+}
+
+bool bluetooth_audio_policy_on_media_suspended(bt_audio_policy_t *policy) {
+    if (policy->state != BT_AUDIO_CONNECTED && policy->state != BT_AUDIO_STREAMING) {
+        return false;
+    }
+    policy->media_streaming = false;
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->source_ready = false;
+    return true;
+}
+
 void bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy) {
     policy->state = BT_AUDIO_CONNECTED;
     policy->attempt_outstanding = false;
+    policy->media_streaming = false;
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->source_ready = false;
 }
 
 void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t now_us) {
     policy->state = BT_AUDIO_DISABLED;
     policy->retry_at_us = now_us + (int64_t)APP_BT_RECONNECT_MS * 1000;
     policy->attempt_outstanding = false;
+    policy->media_streaming = false;
+    policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
+    policy->source_ready = false;
 }

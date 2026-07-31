@@ -211,6 +211,25 @@ void test_audio_stop_cancels_active_pcm_playback(void) {
     TEST_ASSERT_FALSE(audio_is_active());
 }
 
+void test_audio_impact_finishes_after_one_second_of_pcm_without_transport_preroll(void) {
+    const size_t asset_bytes = (size_t)APP_AUDIO_SAMPLE_RATE * APP_AUDIO_CHANNELS * 2U;
+    uint8_t buffer[512];
+    size_t supplied = 0;
+
+    audio_init();
+    TEST_ASSERT_TRUE(audio_start_impact());
+
+    while (supplied < asset_bytes) {
+        int32_t requested = (int32_t)((asset_bytes - supplied) < sizeof(buffer)
+                                          ? (asset_bytes - supplied)
+                                          : sizeof(buffer));
+        TEST_ASSERT_EQUAL_INT32(requested, audio_fill_pcm(buffer, requested));
+        supplied += (size_t)requested;
+    }
+
+    TEST_ASSERT_FALSE(audio_is_active());
+}
+
 void test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends(void) {
     int64_t audio_busy_until_us = 0;
 
@@ -246,6 +265,85 @@ void test_bluetooth_policy_stops_requesting_after_a_connection_callback(void) {
     bluetooth_audio_policy_on_connected(&policy);
 
     TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, 10000000));
+}
+
+void test_bluetooth_policy_keeps_media_started_while_connected(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_keep_media_started(&policy));
+
+    bluetooth_audio_policy_on_connected(&policy);
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_keep_media_started(&policy));
+
+    bluetooth_audio_policy_on_disconnected(&policy, 1000000);
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_keep_media_started(&policy));
+}
+
+void test_bluetooth_policy_checks_source_readiness_before_starting_media(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    bluetooth_audio_policy_on_connected(&policy);
+
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_NONE, bluetooth_audio_policy_next_media_action(&policy));
+
+    bluetooth_audio_policy_on_source_ready(&policy, true);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_START, bluetooth_audio_policy_next_media_action(&policy));
+
+    bluetooth_audio_policy_on_media_start_result(&policy, true);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_NONE, bluetooth_audio_policy_next_media_action(&policy));
+}
+
+void test_bluetooth_policy_retries_readiness_after_a_not_ready_response(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    bluetooth_audio_policy_on_connected(&policy);
+
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+    bluetooth_audio_policy_on_source_ready(&policy, false);
+
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+    TEST_ASSERT_EQUAL(BT_AUDIO_CONNECTED, policy.state);
+}
+
+void test_bluetooth_policy_restarts_media_after_remote_suspend(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    bluetooth_audio_policy_on_connected(&policy);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+    bluetooth_audio_policy_on_source_ready(&policy, true);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_START, bluetooth_audio_policy_next_media_action(&policy));
+    bluetooth_audio_policy_on_media_start_result(&policy, true);
+
+    bluetooth_audio_policy_on_media_suspended(&policy);
+
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+}
+
+void test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    bluetooth_audio_policy_on_connected(&policy);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY,
+                      bluetooth_audio_policy_next_media_action(&policy));
+    bluetooth_audio_policy_on_source_ready(&policy, true);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_START, bluetooth_audio_policy_next_media_action(&policy));
+
+    bluetooth_audio_policy_on_disconnected(&policy, 1000000);
+
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_on_media_start_result(&policy, true));
+    TEST_ASSERT_EQUAL(BT_AUDIO_DISABLED, policy.state);
+    TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_NONE, bluetooth_audio_policy_next_media_action(&policy));
 }
 
 void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect(void) {
@@ -291,10 +389,16 @@ void app_main(void) {
     RUN_TEST(test_impact_threshold_crossing_detects_negative_saturation_after_rearming);
     RUN_TEST(test_audio_impact_duration_is_available_for_calibration_timing);
     RUN_TEST(test_audio_stop_cancels_active_pcm_playback);
+    RUN_TEST(test_audio_impact_finishes_after_one_second_of_pcm_without_transport_preroll);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
     RUN_TEST(test_calibration_metadata_converts_the_impact_threshold_to_the_physical_acceleration);
     RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
     RUN_TEST(test_bluetooth_policy_stops_requesting_after_a_connection_callback);
+    RUN_TEST(test_bluetooth_policy_keeps_media_started_while_connected);
+    RUN_TEST(test_bluetooth_policy_checks_source_readiness_before_starting_media);
+    RUN_TEST(test_bluetooth_policy_retries_readiness_after_a_not_ready_response);
+    RUN_TEST(test_bluetooth_policy_restarts_media_after_remote_suspend);
+    RUN_TEST(test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect);
     RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
     RUN_TEST(test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped);
     UNITY_END();

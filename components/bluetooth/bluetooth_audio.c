@@ -19,29 +19,12 @@
 
 #define WORKER_INTERVAL_MS 50U
 
-typedef enum {
-    MEDIA_IDLE,
-    MEDIA_STARTING,
-    MEDIA_STREAMING,
-    MEDIA_SUSPENDING,
-} media_state_t;
-
-typedef enum {
-    PCM_NONE,
-    PCM_IMPACT,
-    PCM_KEEPALIVE,
-} pcm_kind_t;
-
 static const char *TAG = "BT_AUDIO";
 static const esp_bd_addr_t s_speaker_bda = APP_BT_SPEAKER_BDA;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bt_audio_policy_t s_policy;
 static bt_audio_state_callback_t s_state_callback;
 static TaskHandle_t s_worker;
-static media_state_t s_media_state;
-static pcm_kind_t s_pcm_kind;
-static int64_t s_idle_since_us;
-static int64_t s_drain_at_us;
 static bool s_initialized;
 static bool s_source_ready;
 static bool s_started;
@@ -91,51 +74,19 @@ static void set_state(bt_audio_state_t state) {
 static void media_error(const char *operation, esp_err_t error) {
     ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(error));
     audio_stop();
-    portENTER_CRITICAL(&s_lock);
-    s_media_state = MEDIA_IDLE;
-    s_pcm_kind = PCM_NONE;
-    s_drain_at_us = 0;
-    portEXIT_CRITICAL(&s_lock);
     set_state(BT_AUDIO_ERROR);
-}
-
-static esp_err_t start_media(void) {
-    portENTER_CRITICAL(&s_lock);
-    if (s_media_state == MEDIA_STREAMING || s_media_state == MEDIA_STARTING) {
-        portEXIT_CRITICAL(&s_lock);
-        return ESP_OK;
-    }
-    s_media_state = MEDIA_STARTING;
-    portEXIT_CRITICAL(&s_lock);
-
-    esp_err_t error = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
-    if (error != ESP_OK) {
-        media_error("A2DP media start", error);
-    }
-    return error;
 }
 
 static int32_t a2dp_data_callback(uint8_t *data, int32_t len) {
     if (len < 0) {
         audio_stop();
-        portENTER_CRITICAL(&s_lock);
-        s_pcm_kind = PCM_NONE;
-        portEXIT_CRITICAL(&s_lock);
         return 0;
     }
     if (data == NULL || len == 0) {
         return 0;
     }
 
-    int32_t read = audio_fill_pcm(data, len);
-    if (read < len) {
-        portENTER_CRITICAL(&s_lock);
-        if (s_drain_at_us == 0) {
-            s_drain_at_us = esp_timer_get_time() + (int64_t)APP_A2DP_DRAIN_GRACE_MS * 1000;
-        }
-        portEXIT_CRITICAL(&s_lock);
-        wake_worker();
-    }
+    (void)audio_fill_pcm(data, len);
     return len;
 }
 
@@ -161,12 +112,9 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
     if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         portENTER_CRITICAL(&s_lock);
         bluetooth_audio_policy_on_connected(&s_policy);
-        s_media_state = MEDIA_IDLE;
-        s_pcm_kind = PCM_NONE;
-        s_idle_since_us = now_us;
-        s_drain_at_us = 0;
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_CONNECTED);
+        wake_worker();
         ESP_LOGI(TAG, "connected to configured speaker");
     } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         audio_stop();
@@ -177,9 +125,6 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
         } else {
             bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
         }
-        s_media_state = MEDIA_IDLE;
-        s_pcm_kind = PCM_NONE;
-        s_drain_at_us = 0;
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_DISABLED);
         wake_worker();
@@ -189,27 +134,31 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
 
 static void media_acknowledged(const esp_a2d_cb_param_t *param) {
     esp_a2d_media_ctrl_t command = param->media_ctrl_stat.cmd;
-    if (command == ESP_A2D_MEDIA_CTRL_START) {
-        if (param->media_ctrl_stat.status != ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
-            media_error("A2DP media start acknowledgement", ESP_FAIL);
-            return;
-        }
+    bool success = param->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS;
+    bool handled;
+    if (command == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY) {
         portENTER_CRITICAL(&s_lock);
-        s_media_state = MEDIA_STREAMING;
+        handled = bluetooth_audio_policy_on_source_ready(&s_policy, success);
         portEXIT_CRITICAL(&s_lock);
-        set_state(BT_AUDIO_STREAMING);
+        if (handled) {
+            wake_worker();
+        }
+    } else if (command == ESP_A2D_MEDIA_CTRL_START) {
+        portENTER_CRITICAL(&s_lock);
+        handled = bluetooth_audio_policy_on_media_start_result(&s_policy, success);
+        portEXIT_CRITICAL(&s_lock);
+        if (handled) {
+            set_state(success ? BT_AUDIO_STREAMING : BT_AUDIO_CONNECTED);
+            wake_worker();
+        }
     } else if (command == ESP_A2D_MEDIA_CTRL_SUSPEND) {
-        if (param->media_ctrl_stat.status != ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
-            media_error("A2DP media suspend acknowledgement", ESP_FAIL);
-            return;
-        }
         portENTER_CRITICAL(&s_lock);
-        s_media_state = MEDIA_IDLE;
-        s_pcm_kind = PCM_NONE;
-        s_idle_since_us = esp_timer_get_time();
-        s_drain_at_us = 0;
+        handled = bluetooth_audio_policy_on_media_suspended(&s_policy);
         portEXIT_CRITICAL(&s_lock);
-        set_state(BT_AUDIO_CONNECTED);
+        if (handled) {
+            set_state(BT_AUDIO_CONNECTED);
+            wake_worker();
+        }
     }
 }
 
@@ -226,10 +175,22 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             break;
         case ESP_A2D_AUDIO_STATE_EVT:
             if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED) {
+                bool handled;
                 portENTER_CRITICAL(&s_lock);
-                s_media_state = MEDIA_STREAMING;
+                handled = bluetooth_audio_policy_on_media_start_result(&s_policy, true);
                 portEXIT_CRITICAL(&s_lock);
-                set_state(BT_AUDIO_STREAMING);
+                if (handled) {
+                    set_state(BT_AUDIO_STREAMING);
+                }
+            } else if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_SUSPEND) {
+                bool handled;
+                portENTER_CRITICAL(&s_lock);
+                handled = bluetooth_audio_policy_on_media_suspended(&s_policy);
+                portEXIT_CRITICAL(&s_lock);
+                if (handled) {
+                    set_state(BT_AUDIO_CONNECTED);
+                    wake_worker();
+                }
             }
             break;
         case ESP_A2D_PROF_STATE_EVT:
@@ -268,46 +229,29 @@ static void attempt_connection(int64_t now_us) {
     }
 }
 
-static void process_drain(int64_t now_us) {
-    bool suspend = false;
+static void process_keep_media_started(void) {
+    bt_audio_media_action_t action;
     portENTER_CRITICAL(&s_lock);
-    if (s_drain_at_us != 0 && now_us >= s_drain_at_us && s_media_state == MEDIA_STREAMING) {
-        s_drain_at_us = 0;
-        s_media_state = MEDIA_SUSPENDING;
-        suspend = true;
-    }
+    action = bluetooth_audio_policy_next_media_action(&s_policy);
     portEXIT_CRITICAL(&s_lock);
-    if (!suspend) {
+    if (action == BT_AUDIO_MEDIA_ACTION_NONE) {
         return;
     }
 
-    esp_err_t error = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
+    esp_a2d_media_ctrl_t command = action == BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY
+                                        ? ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY
+                                        : ESP_A2D_MEDIA_CTRL_START;
+    esp_err_t error = esp_a2d_media_ctrl(command);
     if (error != ESP_OK) {
-        media_error("A2DP media suspend", error);
+        ESP_LOGW(TAG, "A2DP media command %d failed: %s", command, esp_err_to_name(error));
+        portENTER_CRITICAL(&s_lock);
+        if (action == BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY) {
+            bluetooth_audio_policy_on_source_ready(&s_policy, false);
+        } else {
+            bluetooth_audio_policy_on_media_start_result(&s_policy, false);
+        }
+        portEXIT_CRITICAL(&s_lock);
     }
-}
-
-static void process_keepalive(int64_t now_us) {
-#if APP_FEATURE_SPEAKER_KEEPALIVE
-    bool due;
-    portENTER_CRITICAL(&s_lock);
-    due = s_policy.state == BT_AUDIO_CONNECTED && s_media_state == MEDIA_IDLE && s_pcm_kind == PCM_NONE &&
-          s_idle_since_us != 0 &&
-          now_us - s_idle_since_us >= (int64_t)APP_SPEAKER_KEEPALIVE_IDLE_MS * 1000;
-    portEXIT_CRITICAL(&s_lock);
-    if (!due || !audio_start_silence(APP_SPEAKER_KEEPALIVE_STREAM_MS)) {
-        return;
-    }
-
-    portENTER_CRITICAL(&s_lock);
-    s_pcm_kind = PCM_KEEPALIVE;
-    portEXIT_CRITICAL(&s_lock);
-    if (start_media() != ESP_OK) {
-        audio_stop();
-    }
-#else
-    (void)now_us;
-#endif
 }
 
 static void bluetooth_worker(void *arg) {
@@ -315,8 +259,7 @@ static void bluetooth_worker(void *arg) {
     for (;;) {
         int64_t now_us = esp_timer_get_time();
         attempt_connection(now_us);
-        process_drain(now_us);
-        process_keepalive(now_us);
+        process_keep_media_started();
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WORKER_INTERVAL_MS));
     }
 }
@@ -370,7 +313,6 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
 
     portENTER_CRITICAL(&s_lock);
     s_initialized = true;
-    s_idle_since_us = esp_timer_get_time();
     portEXIT_CRITICAL(&s_lock);
     return true;
 }
@@ -394,33 +336,16 @@ void bluetooth_audio_start(void) {
 bt_audio_play_result_t bluetooth_audio_start_impact(void) {
     portENTER_CRITICAL(&s_lock);
     bt_audio_state_t state = s_policy.state;
-    pcm_kind_t pcm_kind = s_pcm_kind;
-    bool media_available = s_media_state != MEDIA_SUSPENDING;
-    if ((state == BT_AUDIO_CONNECTED || state == BT_AUDIO_STREAMING) && media_available) {
-        s_drain_at_us = 0;
-    }
     portEXIT_CRITICAL(&s_lock);
 
-    if ((state != BT_AUDIO_CONNECTED && state != BT_AUDIO_STREAMING) || !media_available) {
+    if (state != BT_AUDIO_CONNECTED && state != BT_AUDIO_STREAMING) {
         return BT_AUDIO_PLAY_DISCONNECTED;
-    }
-    if (pcm_kind == PCM_KEEPALIVE) {
-        audio_stop();
-        portENTER_CRITICAL(&s_lock);
-        s_pcm_kind = PCM_NONE;
-        portEXIT_CRITICAL(&s_lock);
     }
     if (!audio_start_impact()) {
         return BT_AUDIO_PLAY_BUSY;
     }
 
-    portENTER_CRITICAL(&s_lock);
-    s_pcm_kind = PCM_IMPACT;
-    portEXIT_CRITICAL(&s_lock);
-    if (start_media() != ESP_OK) {
-        audio_stop();
-        return BT_AUDIO_PLAY_ERROR;
-    }
+    wake_worker();
     return BT_AUDIO_PLAY_STARTED;
 }
 
