@@ -19,7 +19,8 @@ static void print_status(void) {
     printf("accel_range_g=%d\n", APP_ACCEL_RANGE_G);
     printf("impact_axis=y\nimpact_refractory_ms=%u\n", APP_IMPACT_REFRACTORY_MS);
     printf("bt_state=%d\n", (int)bluetooth_audio_get_state());
-    printf("bt_target=78:66:F3:3D:7E:4D\n");
+    printf("bt_target_primary=78:66:F3:3D:7E:4D\n");
+    printf("bt_target_secondary=74:68:59:BB:73:06\n");
 }
 
 static const char *playback_result_name(bt_audio_play_result_t result) {

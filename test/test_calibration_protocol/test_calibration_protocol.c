@@ -254,6 +254,7 @@ void test_bluetooth_policy_requests_the_initial_connection_only_once(void) {
     bluetooth_audio_policy_init(&policy);
 
     TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
     TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, 0));
 }
 
@@ -346,7 +347,7 @@ void test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect(void) {
     TEST_ASSERT_EQUAL(BT_AUDIO_MEDIA_ACTION_NONE, bluetooth_audio_policy_next_media_action(&policy));
 }
 
-void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect(void) {
+void test_bluetooth_policy_reconnects_at_the_exact_five_second_boundary_after_disconnect(void) {
     bt_audio_policy_t policy;
     const int64_t disconnected_at_us = 1234567;
 
@@ -354,9 +355,57 @@ void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconne
     TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
     bluetooth_audio_policy_on_disconnected(&policy, disconnected_at_us);
 
-    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 9999999));
-    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 10000000));
-    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 10000001));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 4999999));
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 5000000));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 5000001));
+}
+
+void test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request(void) {
+    bt_audio_policy_t policy;
+    const int64_t first_disconnect_us = 1000000;
+    const int64_t second_disconnect_us = 7000000;
+
+    bluetooth_audio_policy_init(&policy);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
+    bluetooth_audio_policy_on_disconnected(&policy, first_disconnect_us);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, first_disconnect_us + 5000000));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_SECONDARY, bluetooth_audio_policy_attempted_speaker(&policy));
+    bluetooth_audio_policy_on_disconnected(&policy, second_disconnect_us);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, second_disconnect_us + 5000000));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
+}
+
+void test_bluetooth_policy_retries_the_same_speaker_after_an_immediate_connection_failure(void) {
+    bt_audio_policy_t policy;
+    const int64_t failure_us = 1000000;
+
+    bluetooth_audio_policy_init(&policy);
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
+
+    bluetooth_audio_policy_on_connection_request_failed(&policy, failure_us);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, failure_us + 5000000));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
+}
+
+void test_bluetooth_policy_defers_manual_reconnect_until_an_inflight_attempt_disconnects(void) {
+    bt_audio_policy_t policy;
+
+    bluetooth_audio_policy_init(&policy);
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_request_reconnect(&policy));
+
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, 1));
+
+    bluetooth_audio_policy_on_disconnected(&policy, 2);
+
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 2));
+    TEST_ASSERT_EQUAL(BT_AUDIO_SPEAKER_PRIMARY, bluetooth_audio_policy_attempted_speaker(&policy));
 }
 
 void test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped(void) {
@@ -399,7 +448,10 @@ void app_main(void) {
     RUN_TEST(test_bluetooth_policy_retries_readiness_after_a_not_ready_response);
     RUN_TEST(test_bluetooth_policy_restarts_media_after_remote_suspend);
     RUN_TEST(test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect);
-    RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
+    RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_five_second_boundary_after_disconnect);
+    RUN_TEST(test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request);
+    RUN_TEST(test_bluetooth_policy_retries_the_same_speaker_after_an_immediate_connection_failure);
+    RUN_TEST(test_bluetooth_policy_defers_manual_reconnect_until_an_inflight_attempt_disconnects);
     RUN_TEST(test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped);
     UNITY_END();
 }

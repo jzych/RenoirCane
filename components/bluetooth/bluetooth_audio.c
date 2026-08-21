@@ -20,7 +20,11 @@
 #define WORKER_INTERVAL_MS 50U
 
 static const char *TAG = "BT_AUDIO";
-static const esp_bd_addr_t s_speaker_bda = APP_BT_SPEAKER_BDA;
+static const esp_bd_addr_t s_speaker_bdas[] = {
+    APP_BT_SPEAKER_PRIMARY_BDA,
+    APP_BT_SPEAKER_SECONDARY_BDA,
+};
+static esp_bd_addr_t s_active_speaker_bda;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bt_audio_policy_t s_policy;
 static bt_audio_state_callback_t s_state_callback;
@@ -28,7 +32,6 @@ static TaskHandle_t s_worker;
 static bool s_initialized;
 static bool s_source_ready;
 static bool s_started;
-static bool s_reconnect_requested;
 
 static void wake_worker(void) {
     TaskHandle_t worker;
@@ -41,7 +44,11 @@ static void wake_worker(void) {
 }
 
 static bool is_target(const uint8_t *bda) {
-    return bda != NULL && memcmp(bda, s_speaker_bda, ESP_BD_ADDR_LEN) == 0;
+    bool matches;
+    portENTER_CRITICAL(&s_lock);
+    matches = bda != NULL && memcmp(bda, s_active_speaker_bda, ESP_BD_ADDR_LEN) == 0;
+    portEXIT_CRITICAL(&s_lock);
+    return matches;
 }
 
 static void notify_state(bt_audio_state_t state) {
@@ -119,12 +126,7 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
     } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         audio_stop();
         portENTER_CRITICAL(&s_lock);
-        if (s_reconnect_requested) {
-            bluetooth_audio_policy_init(&s_policy);
-            s_reconnect_requested = false;
-        } else {
-            bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
-        }
+        bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_DISABLED);
         wake_worker();
@@ -213,17 +215,21 @@ static void attempt_connection(int64_t now_us) {
     portENTER_CRITICAL(&s_lock);
     should_connect = s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
                      bluetooth_audio_policy_should_connect(&s_policy, now_us);
+    if (should_connect) {
+        memcpy(s_active_speaker_bda, s_speaker_bdas[bluetooth_audio_policy_attempted_speaker(&s_policy)],
+               ESP_BD_ADDR_LEN);
+    }
     portEXIT_CRITICAL(&s_lock);
     if (!should_connect) {
         return;
     }
 
     notify_state(BT_AUDIO_CONNECTING);
-    esp_err_t error = esp_a2d_source_connect((uint8_t *)s_speaker_bda);
+    esp_err_t error = esp_a2d_source_connect(s_active_speaker_bda);
     if (error != ESP_OK) {
         ESP_LOGW(TAG, "A2DP connection request failed immediately: %s", esp_err_to_name(error));
         portENTER_CRITICAL(&s_lock);
-        bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
+        bluetooth_audio_policy_on_connection_request_failed(&s_policy, now_us);
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_DISABLED);
     }
@@ -352,16 +358,15 @@ bt_audio_play_result_t bluetooth_audio_start_impact(void) {
 void bluetooth_audio_request_reconnect(void) {
     bool disconnect;
     portENTER_CRITICAL(&s_lock);
-    disconnect = s_policy.state == BT_AUDIO_CONNECTED || s_policy.state == BT_AUDIO_STREAMING;
-    s_reconnect_requested = disconnect;
-    if (!disconnect) {
-        bluetooth_audio_policy_init(&s_policy);
-    }
+    disconnect = bluetooth_audio_policy_request_reconnect(&s_policy);
     portEXIT_CRITICAL(&s_lock);
 
     audio_stop();
     if (disconnect) {
-        (void)esp_a2d_source_disconnect((uint8_t *)s_speaker_bda);
+        esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
+        if (error != ESP_OK) {
+            media_error("A2DP disconnect request", error);
+        }
     } else {
         notify_state(BT_AUDIO_DISABLED);
         wake_worker();
