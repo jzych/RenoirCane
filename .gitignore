@@ -84,3 +84,6 @@ calibration_app/CaneCalibration.spec
 sdkconfig.tinypico
 sdkconfig.tinypico_calibration
 sdkconfig.tinypico_test
+
+# user files
+.tasks/

@@ -44,5 +44,7 @@ bt_audio_media_action_t bluetooth_audio_policy_next_media_action(bt_audio_policy
 bool bluetooth_audio_policy_on_source_ready(bt_audio_policy_t *policy, bool ready);
 bool bluetooth_audio_policy_on_media_start_result(bt_audio_policy_t *policy, bool started);
 bool bluetooth_audio_policy_on_media_suspended(bt_audio_policy_t *policy);
-void bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy);
+/* Returns true when a manual reconnect was requested while the link was opening.  The caller must
+   disconnect the now-established A2DP link so the normal disconnected path can reconnect. */
+bool bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy);
 void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t now_us);

@@ -41,9 +41,10 @@ void bluetooth_audio_policy_on_connection_request_failed(bt_audio_policy_t *poli
 }
 
 bool bluetooth_audio_policy_request_reconnect(bt_audio_policy_t *policy) {
-    bool disconnect = policy->state == BT_AUDIO_CONNECTING || policy->state == BT_AUDIO_CONNECTED ||
-                      policy->state == BT_AUDIO_STREAMING;
-    if (disconnect) {
+    bool disconnect = policy->state == BT_AUDIO_CONNECTED || policy->state == BT_AUDIO_STREAMING;
+    if (policy->state == BT_AUDIO_CONNECTING || disconnect) {
+        /* ESP-IDF drops A2DP disconnect requests while the connection is still opening.  Preserve
+           this request until the connection callback, which can disconnect the established link. */
         policy->reconnect_requested = true;
     } else {
         bluetooth_audio_policy_init(policy);
@@ -98,12 +99,14 @@ bool bluetooth_audio_policy_on_media_suspended(bt_audio_policy_t *policy) {
     return true;
 }
 
-void bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy) {
+bool bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy) {
+    bool reconnect_requested = policy->reconnect_requested;
     policy->state = BT_AUDIO_CONNECTED;
     policy->attempt_outstanding = false;
     policy->media_streaming = false;
     policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
     policy->source_ready = false;
+    return reconnect_requested;
 }
 
 void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t now_us) {

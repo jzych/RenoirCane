@@ -117,10 +117,18 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
 
     int64_t now_us = esp_timer_get_time();
     if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+        bool disconnect_for_reconnect;
         portENTER_CRITICAL(&s_lock);
-        bluetooth_audio_policy_on_connected(&s_policy);
+        disconnect_for_reconnect = bluetooth_audio_policy_on_connected(&s_policy);
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_CONNECTED);
+        if (disconnect_for_reconnect) {
+            ESP_LOGI(TAG, "disconnecting established A2DP link for requested reconnect");
+            esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
+            if (error != ESP_OK) {
+                media_error("A2DP disconnect request", error);
+            }
+        }
         wake_worker();
         ESP_LOGI(TAG, "connected to configured speaker");
     } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
@@ -357,7 +365,9 @@ bt_audio_play_result_t bluetooth_audio_start_impact(void) {
 
 void bluetooth_audio_request_reconnect(void) {
     bool disconnect;
+    bool awaiting_connection;
     portENTER_CRITICAL(&s_lock);
+    awaiting_connection = s_policy.state == BT_AUDIO_CONNECTING;
     disconnect = bluetooth_audio_policy_request_reconnect(&s_policy);
     portEXIT_CRITICAL(&s_lock);
 
@@ -367,7 +377,7 @@ void bluetooth_audio_request_reconnect(void) {
         if (error != ESP_OK) {
             media_error("A2DP disconnect request", error);
         }
-    } else {
+    } else if (!awaiting_connection) {
         notify_state(BT_AUDIO_DISABLED);
         wake_worker();
     }
