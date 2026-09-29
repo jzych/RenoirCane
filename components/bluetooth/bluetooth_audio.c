@@ -220,18 +220,21 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
 
 static void attempt_connection(int64_t now_us) {
     bool should_connect;
+    bt_audio_speaker_t speaker = BT_AUDIO_SPEAKER_PRIMARY;
     portENTER_CRITICAL(&s_lock);
     should_connect = s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
                      bluetooth_audio_policy_should_connect(&s_policy, now_us);
     if (should_connect) {
-        memcpy(s_active_speaker_bda, s_speaker_bdas[bluetooth_audio_policy_attempted_speaker(&s_policy)],
-               ESP_BD_ADDR_LEN);
+        speaker = bluetooth_audio_policy_attempted_speaker(&s_policy);
+        memcpy(s_active_speaker_bda, s_speaker_bdas[speaker], ESP_BD_ADDR_LEN);
     }
     portEXIT_CRITICAL(&s_lock);
     if (!should_connect) {
         return;
     }
 
+    ESP_LOGI(TAG, "A2DP connect request to %s speaker",
+             speaker == BT_AUDIO_SPEAKER_PRIMARY ? "primary" : "secondary");
     notify_state(BT_AUDIO_CONNECTING);
     esp_err_t error = esp_a2d_source_connect(s_active_speaker_bda);
     if (error != ESP_OK) {
