@@ -1,4 +1,4 @@
-This prompt continues implementation of TinyPICO project with BLE and accelerometer. All implementation decisions made so far are stored in .tasks/database.md file
+This prompt continues implementation of TinyPICO project with BT and accelerometer. All implementation decisions made so far are stored in .tasks/database.md file
 
 # [TASK_ID] - [TASK_NAME]
 
