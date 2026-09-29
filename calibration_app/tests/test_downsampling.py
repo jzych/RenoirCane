@@ -27,3 +27,19 @@ def test_impact_event_offsets_include_only_events_in_the_visible_sample_window()
         start_timestamp_us=0xFFFFFFF0,
         end_timestamp_us=0x00000010,
     ) == (8, 24)
+
+
+def test_min_max_downsampling_keeps_points_in_time_order():
+    # In every bucket the maximum comes before the minimum.
+    samples = [(index, float(-index if index % 100 > 50 else index)) for index in range(3000)]
+
+    output = min_max_downsample(samples, width=30)
+
+    assert len(output) == 60
+    assert [time for time, _ in output] == sorted(time for time, _ in output)
+
+
+def test_min_max_downsampling_returns_short_input_unchanged():
+    samples = [(index, float(index)) for index in range(60)]
+
+    assert min_max_downsample(samples, width=30) is samples

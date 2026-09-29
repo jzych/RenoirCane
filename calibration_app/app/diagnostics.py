@@ -12,5 +12,5 @@ def _android_info(tag: str, message: str) -> None:
 def diagnose(message: str) -> None:
     try:
         _android_info("CaneDiag", message)
-    except ImportError:
+    except Exception:
         logging.getLogger("CaneDiag").info(message)

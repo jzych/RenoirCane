@@ -91,3 +91,36 @@ def test_controller_reset_session_discards_previous_samples_events_and_gaps():
     assert impact_events == ()
     assert gaps == 0
     assert controller.impact_telemetry.event_packets_sent == 0
+
+
+def test_controller_records_skipped_impact_events_as_skipped():
+    controller = CalibrationController()
+
+    controller.handle_packet(Packet(1, CAL_PKT_IMPACT_EVENT, struct.pack("<IB", 42, 2)))
+
+    _config, _samples, impact_events, _gaps = controller.model.graph_snapshot()
+    assert [(event.timestamp_us, event.outcome) for event in impact_events] == [(42, "skipped")]
+
+
+def encoded_samples(count: int) -> bytes:
+    return bytes([count]) + b"".join(struct.pack("<IIhhh", index, index, 0, 0, 0) for index in range(count))
+
+
+def test_controller_accepts_sample_batches_of_one_to_sixteen():
+    controller = CalibrationController()
+
+    controller.handle_packet(Packet(1, CAL_PKT_SAMPLE_BATCH, encoded_samples(1)))
+    controller.handle_packet(Packet(1, CAL_PKT_SAMPLE_BATCH, encoded_samples(16)))
+
+    assert controller.bad_payload_count == 0
+    assert len(controller.model.samples) == 17
+
+
+def test_controller_rejects_sample_batch_counts_outside_the_firmware_limit():
+    controller = CalibrationController()
+
+    for payload in (b"", encoded_samples(0), encoded_samples(17)):
+        controller.handle_packet(Packet(1, CAL_PKT_SAMPLE_BATCH, payload))
+
+    assert controller.bad_payload_count == 3
+    assert list(controller.model.samples) == []

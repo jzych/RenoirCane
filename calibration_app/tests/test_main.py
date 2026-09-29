@@ -94,36 +94,55 @@ class CalibrationAppTests(TestCase):
         self.assertEqual(backend.writes, [encode_frame(CAL_CMD_GET_METADATA, b"")])
         root.reader.start.assert_called_once_with()
 
-def test_refresh_renders_the_model_snapshot_not_live_samples(self):
-    config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
-    samples = (Sample(1, 10, 1, 2, 3),)
-    impact_events = (ImpactEvent(10, "processed"),)
-    root = CalibrationRoot()
-    root.reader = SimpleNamespace(error=None)
-    root.controller.model = SimpleNamespace(
-        graph_snapshot=lambda: (config, samples, impact_events, 7)
-    )
-    root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
-    root.controller.impact_telemetry = SimpleNamespace(
-        int1_received=1,
-        tap_confirmed=2,
-        threshold_rejected=3,
-        refractory_skipped=4,
-        audio_busy_skipped=5,
-        event_packets_sent=6,
-        event_queue_dropped=7,
-    )
-    recorder = GraphRecorder()
-    root.ids["graph"] = recorder
+    def _root_with_snapshot(self, config, samples=(), impact_events=(), gaps=0, reader_error=None):
+        root = CalibrationRoot()
+        root.reader = SimpleNamespace(error=reader_error)
+        root.controller.model = SimpleNamespace(
+            graph_snapshot=lambda: (config, samples, impact_events, gaps)
+        )
+        root.controller.firmware_status = SimpleNamespace(samples_dropped=2)
+        root.controller.impact_telemetry = SimpleNamespace(
+            int1_received=1,
+            tap_confirmed=2,
+            threshold_rejected=3,
+            refractory_skipped=4,
+            audio_busy_skipped=5,
+            event_packets_sent=6,
+            event_queue_dropped=7,
+        )
+        recorder = GraphRecorder()
+        root.ids["graph"] = recorder
+        return root, recorder
 
-    root.refresh(0)
+    def test_refresh_renders_the_model_snapshot_not_live_samples(self):
+        config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
+        samples = (Sample(1, 10, 1, 2, 3),)
+        impact_events = (ImpactEvent(10, "processed"),)
+        root, recorder = self._root_with_snapshot(config, samples, impact_events, gaps=7)
 
-    assert recorder.received == (config, samples, impact_events)
-    assert "gaps 7" in root.status_text
-    assert "irq 1" in root.status_text
-    assert "tap 2" in root.status_text
-    assert "threshold 3" in root.status_text
-    assert "refractory 4" in root.status_text
-    assert "busy 5" in root.status_text
-    assert "sent 6" in root.status_text
-    assert "queue 7" in root.status_text
+        root.refresh(0)
+
+        self.assertEqual(recorder.received, (config, samples, impact_events))
+        self.assertEqual(
+            root.status_text,
+            "Y axis, graph ±4.8 g, drops 2, gaps 7; "
+            "irq 1, tap 2, threshold 3, refractory 4, busy 5, sent 6, queue 7",
+        )
+
+    def test_refresh_reports_reader_error_without_rendering(self):
+        config = GraphConfig("Y", 4, 12000, 1.0, 0.976)
+        root, recorder = self._root_with_snapshot(config, reader_error="port closed")
+
+        root.refresh(0)
+
+        self.assertEqual(root.status_text, "Disconnected: port closed")
+        self.assertFalse(hasattr(recorder, "received"))
+
+    def test_refresh_waits_for_metadata_before_rendering(self):
+        root, recorder = self._root_with_snapshot(None)
+        root.status_text = "Connected — waiting for metadata"
+
+        root.refresh(0)
+
+        self.assertEqual(root.status_text, "Connected — waiting for metadata")
+        self.assertFalse(hasattr(recorder, "received"))

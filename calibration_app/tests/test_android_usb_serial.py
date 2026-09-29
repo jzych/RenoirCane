@@ -107,6 +107,8 @@ def test_connect_requests_android_usb_permission_before_opening():
         backend.connect("42", 921600)
 
     assert bridge.permission_requested_for == 42
+    assert bridge.opened_with is None
+    assert backend.connected is False
 
 
 def test_connects_authorized_android_usb_device_at_requested_baudrate():
