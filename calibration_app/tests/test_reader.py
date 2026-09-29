@@ -1,5 +1,7 @@
+import struct
 import threading
 
+import app.diagnostics as diagnostics_module
 import app.reader as reader_module
 from app.controller import CalibrationController
 from app.protocol import CAL_PKT_METADATA, encode_frame
@@ -66,3 +68,60 @@ def test_reader_logs_decoded_packet_count(monkeypatch):
     reader.stop()
 
     assert "Reader decoded packets=1" in messages
+
+
+class PacketStreamBackend:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._connected = True
+        self.drained = threading.Event()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def read(self, _size: int) -> bytes:
+        self._connected = False
+        self.drained.set()
+        return self._data
+
+    def close(self) -> None:
+        self._connected = False
+
+
+def test_reader_forwards_decoded_packets_to_the_controller_and_counts_bad_frames(monkeypatch):
+    messages = []
+    monkeypatch.setattr(reader_module, "diagnose", messages.append)
+    metadata = struct.pack("<HBBhfBBBB", 800, 16, 1, 4500, 0.488, 14, 4, 1, 0)
+    corrupt = bytearray(encode_frame(CAL_PKT_METADATA, metadata))
+    corrupt[5] ^= 0x01
+    backend = PacketStreamBackend(bytes(corrupt) + encode_frame(CAL_PKT_METADATA, metadata))
+    controller = CalibrationController()
+    reader = CalibrationReader(backend, controller)
+
+    reader.start()
+    assert backend.drained.wait(timeout=1.0)
+    reader.stop()
+
+    assert reader.error is None
+    assert controller.model.graph_config.axis_label == "Y"
+    assert "Reader bad_packets=1" in messages
+
+
+def test_reader_survives_platform_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        diagnostics_module,
+        "_android_info",
+        lambda _tag, _message: (_ for _ in ()).throw(Exception("Unable to find JAVA_HOME")),
+    )
+    metadata = struct.pack("<HBBhfBBBB", 800, 16, 1, 4500, 0.488, 14, 4, 1, 0)
+    backend = PacketStreamBackend(encode_frame(CAL_PKT_METADATA, metadata))
+    controller = CalibrationController()
+    reader = CalibrationReader(backend, controller)
+
+    reader.start()
+    assert backend.drained.wait(timeout=1.0)
+    reader.stop()
+
+    assert reader.error is None
+    assert controller.model.graph_config is not None
