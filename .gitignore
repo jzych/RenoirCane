@@ -87,3 +87,4 @@ sdkconfig.tinypico_test
 
 # user files
 .tasks/
+.claude/
