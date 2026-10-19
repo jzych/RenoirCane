@@ -15,6 +15,9 @@ typedef void (*bt_audio_state_callback_t)(bt_audio_state_t state);
 
 bool bluetooth_audio_init(bt_audio_state_callback_t callback);
 void bluetooth_audio_start(void);
+/* One-shot until reset. Stops playback/retries and waits for the physical link
+   to disconnect. A false result means the bounded wait expired. */
+bool bluetooth_audio_shutdown(uint32_t timeout_ms);
 bt_audio_play_result_t bluetooth_audio_start_impact(void);
 void bluetooth_audio_request_reconnect(void);
 bool bluetooth_audio_is_connected(void);

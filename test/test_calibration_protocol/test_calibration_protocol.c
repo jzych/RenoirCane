@@ -7,6 +7,7 @@
 #include "bluetooth_audio_policy.h"
 #include "calibration_protocol.h"
 #include "impact.h"
+#include "power_button.h"
 #include "unity.h"
 
 #define RECONNECT_DELAY_US ((int64_t)APP_BT_RECONNECT_MS * 1000)
@@ -456,9 +457,24 @@ void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconne
     TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, 0));
     bluetooth_audio_policy_on_disconnected(&policy, disconnected_at_us);
 
-    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + RECONNECT_DELAY_US - 1));
-    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + RECONNECT_DELAY_US));
-    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + RECONNECT_DELAY_US + 1));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 1999999));
+    TEST_ASSERT_TRUE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 2000000));
+    TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 2000001));
+}
+
+void test_power_switch_sleeps_after_stable_off_and_on_cancels_debounce(void) {
+    power_switch_debounce_t state;
+    power_switch_debounce_init(&state);
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 0));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 1000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 50999));
+    TEST_ASSERT_TRUE(power_switch_should_sleep(&state, true, 51000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 52000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 60000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 80000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 90000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 139999));
+    TEST_ASSERT_TRUE(power_switch_should_sleep(&state, true, 140000));
 }
 
 void test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request(void) {
@@ -589,6 +605,7 @@ void app_main(void) {
     RUN_TEST(test_bluetooth_policy_restarts_media_after_remote_suspend);
     RUN_TEST(test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect);
     RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
+    RUN_TEST(test_power_switch_sleeps_after_stable_off_and_on_cancels_debounce);
     RUN_TEST(test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request);
     RUN_TEST(test_bluetooth_policy_retries_the_same_speaker_after_an_immediate_connection_failure);
     RUN_TEST(test_bluetooth_policy_retries_immediately_after_a_manual_reconnect_during_connecting_fails);

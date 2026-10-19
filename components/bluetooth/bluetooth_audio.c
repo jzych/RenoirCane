@@ -13,11 +13,13 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
 #define WORKER_INTERVAL_MS 50U
+#define SHUTDOWN_COMPLETE_BIT (1U << 0)
 
 static const char *TAG = "BT_AUDIO";
 static const esp_bd_addr_t s_speaker_bdas[] = {
@@ -32,6 +34,12 @@ static TaskHandle_t s_worker;
 static bool s_initialized;
 static bool s_source_ready;
 static bool s_started;
+static bool s_shutdown_requested;
+/* Track the physical link independently of policy/media errors. */
+static bool s_link_opening;
+static bool s_link_connected;
+static bool s_disconnect_pending;
+static EventGroupHandle_t s_shutdown_events;
 
 static void wake_worker(void) {
     TaskHandle_t worker;
@@ -54,7 +62,7 @@ static bool is_target(const uint8_t *bda) {
 static void notify_state(bt_audio_state_t state) {
     bt_audio_state_callback_t callback;
     portENTER_CRITICAL(&s_lock);
-    callback = s_state_callback;
+    callback = s_shutdown_requested ? NULL : s_state_callback;
     portEXIT_CRITICAL(&s_lock);
     if (callback != NULL) {
         callback(state);
@@ -68,7 +76,7 @@ static void set_state(bt_audio_state_t state) {
     portENTER_CRITICAL(&s_lock);
     if (s_policy.state != state) {
         s_policy.state = state;
-        callback = s_state_callback;
+        callback = s_shutdown_requested ? NULL : s_state_callback;
         changed = true;
     }
     portEXIT_CRITICAL(&s_lock);
@@ -119,7 +127,11 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
     if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         bool disconnect_for_reconnect;
         portENTER_CRITICAL(&s_lock);
+        s_link_opening = false;
+        s_link_connected = true;
         disconnect_for_reconnect = bluetooth_audio_policy_on_connected(&s_policy);
+        disconnect_for_reconnect = disconnect_for_reconnect && !s_shutdown_requested && !s_disconnect_pending;
+        if (disconnect_for_reconnect) s_disconnect_pending = true;
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_CONNECTED);
         if (disconnect_for_reconnect) {
@@ -134,6 +146,9 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
     } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         audio_stop();
         portENTER_CRITICAL(&s_lock);
+        s_link_opening = false;
+        s_link_connected = false;
+        s_disconnect_pending = false;
         bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_DISABLED);
@@ -222,11 +237,12 @@ static void attempt_connection(int64_t now_us) {
     bool should_connect;
     bt_audio_speaker_t speaker = BT_AUDIO_SPEAKER_PRIMARY;
     portENTER_CRITICAL(&s_lock);
-    should_connect = s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
+    should_connect = !s_shutdown_requested && s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
                      bluetooth_audio_policy_should_connect(&s_policy, now_us);
     if (should_connect) {
         speaker = bluetooth_audio_policy_attempted_speaker(&s_policy);
         memcpy(s_active_speaker_bda, s_speaker_bdas[speaker], ESP_BD_ADDR_LEN);
+        s_link_opening = true;
     }
     portEXIT_CRITICAL(&s_lock);
     if (!should_connect) {
@@ -240,6 +256,7 @@ static void attempt_connection(int64_t now_us) {
     if (error != ESP_OK) {
         ESP_LOGW(TAG, "A2DP connection request failed immediately: %s", esp_err_to_name(error));
         portENTER_CRITICAL(&s_lock);
+        s_link_opening = false;
         bluetooth_audio_policy_on_connection_request_failed(&s_policy, now_us);
         portEXIT_CRITICAL(&s_lock);
         notify_state(BT_AUDIO_DISABLED);
@@ -249,7 +266,8 @@ static void attempt_connection(int64_t now_us) {
 static void process_keep_media_started(void) {
     bt_audio_media_action_t action;
     portENTER_CRITICAL(&s_lock);
-    action = bluetooth_audio_policy_next_media_action(&s_policy);
+    action = s_shutdown_requested ? BT_AUDIO_MEDIA_ACTION_NONE
+                                  : bluetooth_audio_policy_next_media_action(&s_policy);
     portEXIT_CRITICAL(&s_lock);
     if (action == BT_AUDIO_MEDIA_ACTION_NONE) {
         return;
@@ -271,12 +289,32 @@ static void process_keep_media_started(void) {
     }
 }
 
+static void process_shutdown(void) {
+    portENTER_CRITICAL(&s_lock);
+    bool complete = s_shutdown_requested && !s_link_opening && !s_link_connected;
+    bool disconnect = s_shutdown_requested && s_link_connected && !s_disconnect_pending;
+    if (disconnect) s_disconnect_pending = true;
+    portEXIT_CRITICAL(&s_lock);
+
+    if (disconnect) {
+        ESP_LOGI(TAG, "disconnecting established A2DP link for standby");
+        esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
+        if (error != ESP_OK) {
+            ESP_LOGW(TAG, "standby disconnect request failed: %s", esp_err_to_name(error));
+        }
+    }
+    if (complete && s_shutdown_events != NULL) {
+        xEventGroupSetBits(s_shutdown_events, SHUTDOWN_COMPLETE_BIT);
+    }
+}
+
 static void bluetooth_worker(void *arg) {
     (void)arg;
     for (;;) {
         int64_t now_us = esp_timer_get_time();
         attempt_connection(now_us);
         process_keep_media_started();
+        process_shutdown();
         (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(WORKER_INTERVAL_MS));
     }
 }
@@ -291,6 +329,12 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
     s_state_callback = callback;
     bluetooth_audio_policy_init(&s_policy);
     portEXIT_CRITICAL(&s_lock);
+
+    if (s_shutdown_events == NULL) s_shutdown_events = xEventGroupCreate();
+    if (s_shutdown_events == NULL) {
+        media_error("shutdown event allocation", ESP_ERR_NO_MEM);
+        return false;
+    }
 
     esp_err_t error = nvs_flash_init();
     if (error != ESP_OK) {
@@ -336,7 +380,7 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
 
 void bluetooth_audio_start(void) {
     portENTER_CRITICAL(&s_lock);
-    bool create_worker = s_initialized && !s_started;
+    bool create_worker = s_initialized && !s_started && !s_shutdown_requested;
     if (create_worker) {
         s_started = true;
     }
@@ -350,17 +394,35 @@ void bluetooth_audio_start(void) {
     }
 }
 
+bool bluetooth_audio_shutdown(uint32_t timeout_ms) {
+    portENTER_CRITICAL(&s_lock);
+    s_shutdown_requested = true;
+    bool complete = !s_link_opening && !s_link_connected;
+    portEXIT_CRITICAL(&s_lock);
+    /* start_impact tests the shutdown gate and starts PCM under the same lock,
+       so an impact cannot start playback after this stop. */
+    audio_stop();
+    if (complete) return true;
+
+    wake_worker();
+    EventBits_t bits = xEventGroupWaitBits(s_shutdown_events, SHUTDOWN_COMPLETE_BIT,
+                                          pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    bool disconnected = (bits & SHUTDOWN_COMPLETE_BIT) != 0;
+    if (!disconnected) ESP_LOGW(TAG, "standby disconnect timed out after %lu ms", (unsigned long)timeout_ms);
+    return disconnected;
+}
+
 bt_audio_play_result_t bluetooth_audio_start_impact(void) {
     portENTER_CRITICAL(&s_lock);
     bt_audio_state_t state = s_policy.state;
-    portEXIT_CRITICAL(&s_lock);
 
-    if (state != BT_AUDIO_CONNECTED && state != BT_AUDIO_STREAMING) {
+    if (s_shutdown_requested || (state != BT_AUDIO_CONNECTED && state != BT_AUDIO_STREAMING)) {
+        portEXIT_CRITICAL(&s_lock);
         return BT_AUDIO_PLAY_DISCONNECTED;
     }
-    if (!audio_start_impact()) {
-        return BT_AUDIO_PLAY_BUSY;
-    }
+    bool started = audio_start_impact();
+    portEXIT_CRITICAL(&s_lock);
+    if (!started) return BT_AUDIO_PLAY_BUSY;
 
     wake_worker();
     return BT_AUDIO_PLAY_STARTED;
@@ -370,8 +432,14 @@ void bluetooth_audio_request_reconnect(void) {
     bool disconnect;
     bool awaiting_connection;
     portENTER_CRITICAL(&s_lock);
+    if (s_shutdown_requested) {
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
     awaiting_connection = s_policy.state == BT_AUDIO_CONNECTING;
     disconnect = bluetooth_audio_policy_request_reconnect(&s_policy);
+    disconnect = disconnect && !s_disconnect_pending;
+    if (disconnect) s_disconnect_pending = true;
     portEXIT_CRITICAL(&s_lock);
 
     audio_stop();
