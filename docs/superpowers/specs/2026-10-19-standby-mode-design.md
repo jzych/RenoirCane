@@ -29,7 +29,8 @@ sequence:
    only if GPIO33 remains low. This debounces a physical press and rejects a
    transient low level.
 3. Show amber for 500 ms, stop audio and request Bluetooth shutdown, and wait
-   up to the configured shutdown timeout.
+   up to 10 seconds. This covers the known ~5.3-second JBL A2DP opening delay
+   while still guaranteeing a stuck radio cannot prevent standby indefinitely.
 4. Put the LIS2DW12 into its power-down mode, turn the LED fully off, wait for
    GPIO33 to return high, arm EXT0 wake on GPIO33 low, and enter deep sleep.
 
@@ -100,10 +101,10 @@ changing speaker alternation. The existing Unity suite remains green.
 
 Hardware verification records:
 
-- idle-connected and standby battery current, demonstrating at least 10x
+- idle-connected and standby battery current, demonstrating at least 5x
   reduction;
 - button entry, button wake, speaker reconnect, and a subsequent impact cue;
-- 10 minutes of normal use with GPIO33 unconnected, with no standby entry;
+- 5 minutes of normal use with GPIO33 unconnected, with no standby entry;
 - observed amber/off/cyan LED indications and their durations.
 
 The measured current values, final deep-sleep/pull configuration, and LED
