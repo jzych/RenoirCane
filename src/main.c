@@ -47,35 +47,25 @@ static void IRAM_ATTR impact_irq_notify(void) {
 
 static void impact_task(void *arg) {
     (void)arg;
+    int64_t last_diagnostic_us = 0;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (power_is_entering_standby()) continue;
-        bool tap_candidate = accelerometer_read_impact_status();
-        accelerometer_clear_interrupt();
         accel_sample_t sample;
         impact_event_t event;
-        if (tap_candidate && accelerometer_read_sample(&sample) && impact_validate_candidate(&sample, sample.timestamp_us, &event)) {
-            impact_mark_accepted(event.timestamp_us);
-            bt_audio_play_result_t playback_result = bluetooth_audio_start_impact();
-            ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d playback=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z, playback_result);
+        if (!accelerometer_read_sample(&sample)) continue;
+        impact_candidate_result_t result = impact_process_sample(&sample, bluetooth_audio_start_impact, &event);
+        /* Accepted cues are bounded by refractory; logging every rejected
+           crossing can saturate the console and stall the sample stream. */
+        if (result == IMPACT_CANDIDATE_PROCESSED) {
+            ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z);
         }
-    }
-}
-
-static void accel_diagnostic_task(void *arg) {
-    (void)arg;
-    for (;;) {
-        if (power_is_entering_standby()) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-        accel_sample_t sample;
-        if (accelerometer_read_sample(&sample)) {
+        /* Reuse the detection sample: a second reader can clear data-ready
+           before the detector has consumed the peak. */
+        if (sample.timestamp_us - last_diagnostic_us >= 1000000) {
             ESP_LOGI("ACCEL", "x=%d y=%d z=%d", sample.x, sample.y, sample.z);
-        } else {
-            ESP_LOGW("ACCEL", "sample read failed");
+            last_diagnostic_us = sample.timestamp_us;
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 #endif
@@ -104,12 +94,10 @@ void app_main(void) {
         status_led_set(STATUS_LED_ERROR);
     }
     impact_init(&config);
-    xTaskCreate(impact_task, "impact", 3072, NULL, 6, &s_impact_task);
-    if (!accelerometer_init(impact_irq_notify)) {
+    if (xTaskCreate(impact_task, "impact", 3072, NULL, 8, &s_impact_task) != pdPASS ||
+        !accelerometer_init(NULL) || !accelerometer_set_data_ready_callback(impact_irq_notify)) {
         status_led_set(STATUS_LED_ERROR);
         ESP_LOGE(TAG, "accelerometer initialization failed");
-    } else {
-        xTaskCreate(accel_diagnostic_task, "accel_diag", 3072, NULL, 5, NULL);
     }
     debug_console_init();
     power_init();

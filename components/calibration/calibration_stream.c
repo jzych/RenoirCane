@@ -3,7 +3,6 @@
 #include "app_config.h"
 #include "accelerometer.h"
 #include "calibration_protocol.h"
-#include "calibration_playback.h"
 #include "bluetooth_audio.h"
 #include "impact.h"
 #include "driver/uart.h"
@@ -11,7 +10,6 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define CALIBRATION_QUEUE_CAPACITY 128U
@@ -30,9 +28,8 @@ typedef struct {
 
 static QueueHandle_t s_sample_queue;
 static QueueHandle_t s_impact_event_queue;
-static SemaphoreHandle_t s_accelerometer_mutex;
 static TaskHandle_t s_sample_task;
-static TaskHandle_t s_impact_task;
+static bool s_tap_pending;
 static uint32_t s_next_sequence;
 static uint32_t s_samples_acquired;
 static uint32_t s_samples_transmitted;
@@ -48,10 +45,30 @@ static void impact_telemetry_increment(uint32_t *counter) {
     portEXIT_CRITICAL(&s_impact_telemetry_lock);
 }
 
-static void IRAM_ATTR impact_telemetry_increment_from_isr(uint32_t *counter) {
+static void IRAM_ATTR note_tap_interrupt_from_isr(void) {
     portENTER_CRITICAL_ISR(&s_impact_telemetry_lock);
-    ++*counter;
+    ++s_impact_telemetry.int1_received;
+    s_tap_pending = true;
     portEXIT_CRITICAL_ISR(&s_impact_telemetry_lock);
+}
+
+static bool take_pending_tap(void) {
+    portENTER_CRITICAL(&s_impact_telemetry_lock);
+    bool pending = s_tap_pending;
+    s_tap_pending = false;
+    portEXIT_CRITICAL(&s_impact_telemetry_lock);
+    return pending;
+}
+
+static void capture_tap_diagnostics(const accel_sample_t *sample) {
+    bool tap_candidate = accelerometer_read_impact_status();
+    accelerometer_clear_interrupt();
+    if (tap_candidate) {
+        impact_telemetry_increment(&s_impact_telemetry.tap_confirmed);
+        if (!impact_sample_exceeds_threshold(sample)) {
+            impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
+        }
+    }
 }
 
 static calibration_impact_telemetry_v1_t impact_telemetry_snapshot(void) {
@@ -99,7 +116,7 @@ static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payl
 
 static void emit_impact_outcome(const accel_sample_t *sample) {
     impact_event_t candidate;
-    impact_candidate_result_t result = impact_classify_threshold_crossing(sample, sample->timestamp_us, &candidate);
+    impact_candidate_result_t result = impact_process_sample(sample, bluetooth_audio_start_impact, &candidate);
     if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) return;
 
     calibration_impact_event_v1_t event = {
@@ -108,13 +125,10 @@ static void emit_impact_outcome(const accel_sample_t *sample) {
     };
     if (result == IMPACT_CANDIDATE_REFRACTORY) {
         impact_telemetry_increment(&s_impact_telemetry.refractory_skipped);
-    } else {
-        impact_mark_accepted(candidate.timestamp_us);
-        calibration_playback_outcome_t playback = calibration_playback_map_result(bluetooth_audio_start_impact());
-        event.outcome = playback.outcome;
-        if (playback.audio_busy_skipped) {
-            impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
-        }
+    } else if (result == IMPACT_CANDIDATE_AUDIO_BUSY) {
+        impact_telemetry_increment(&s_impact_telemetry.audio_busy_skipped);
+    } else if (result == IMPACT_CANDIDATE_PROCESSED) {
+        event.outcome = CAL_IMPACT_PROCESSED;
     }
     if (xQueueSend(s_impact_event_queue, &event, 0U) != pdPASS) {
         impact_telemetry_increment(&s_impact_telemetry.event_queue_dropped);
@@ -125,12 +139,21 @@ static void sample_task(void *arg) {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        /* Only diagnose taps that preceded this read. An interrupt arriving
+           during the read must wait for the next fresh stream sample. */
+        bool tap_pending = take_pending_tap();
         accel_sample_t raw;
-        if (xSemaphoreTake(s_accelerometer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) continue;
         bool sample_read = accelerometer_read_sample(&raw);
-        xSemaphoreGive(s_accelerometer_mutex);
-        if (!sample_read) continue;
+        if (!sample_read) {
+            if (tap_pending) {
+                portENTER_CRITICAL(&s_impact_telemetry_lock);
+                s_tap_pending = true;
+                portEXIT_CRITICAL(&s_impact_telemetry_lock);
+            }
+            continue;
+        }
         emit_impact_outcome(&raw);
+        if (tap_pending) capture_tap_diagnostics(&raw);
         calibration_sample_t sample = {
             .seq = s_next_sequence++,
             .timestamp_us = (uint32_t)raw.timestamp_us,
@@ -140,23 +163,6 @@ static void sample_task(void *arg) {
         };
         ++s_samples_acquired;
         if (xQueueSend(s_sample_queue, &sample, 0U) != pdPASS) ++s_samples_dropped;
-    }
-}
-
-static void impact_task(void *arg) {
-    (void)arg;
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (xSemaphoreTake(s_accelerometer_mutex, pdMS_TO_TICKS(50)) != pdTRUE) continue;
-        bool tap_candidate = accelerometer_read_impact_status();
-        accelerometer_clear_interrupt();
-        if (tap_candidate) impact_telemetry_increment(&s_impact_telemetry.tap_confirmed);
-        accel_sample_t sample;
-        bool sample_read = tap_candidate && accelerometer_read_sample(&sample);
-        xSemaphoreGive(s_accelerometer_mutex);
-        if (sample_read && !impact_sample_exceeds_threshold(&sample)) {
-            impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
-        }
     }
 }
 
@@ -208,12 +214,10 @@ static void transport_task(void *arg) {
 bool calibration_stream_start(void) {
     s_sample_queue = xQueueCreate(CALIBRATION_QUEUE_CAPACITY, sizeof(calibration_sample_t));
     s_impact_event_queue = xQueueCreate(CALIBRATION_IMPACT_QUEUE_CAPACITY, sizeof(calibration_impact_event_v1_t));
-    s_accelerometer_mutex = xSemaphoreCreateMutex();
-    if (s_sample_queue == NULL || s_impact_event_queue == NULL || s_accelerometer_mutex == NULL) return false;
+    if (s_sample_queue == NULL || s_impact_event_queue == NULL) return false;
     if (!uart_is_driver_installed(UART_NUM_0) && uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0) != ESP_OK) return false;
     if (uart_set_baudrate(UART_NUM_0, CALIBRATION_UART_BAUD_RATE) != ESP_OK) return false;
     if (xTaskCreate(sample_task, "cal_sample", 3072U, NULL, 8U, &s_sample_task) != pdPASS) return false;
-    if (xTaskCreate(impact_task, "cal_impact", 3072U, NULL, 8U, &s_impact_task) != pdPASS) return false;
     return xTaskCreate(transport_task, "cal_transport", 4096U, NULL, 7U, NULL) == pdPASS;
 }
 
@@ -224,8 +228,6 @@ void IRAM_ATTR calibration_stream_on_data_ready_from_isr(void) {
 }
 
 void IRAM_ATTR calibration_stream_on_impact_from_isr(void) {
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    impact_telemetry_increment_from_isr(&s_impact_telemetry.int1_received);
-    if (s_impact_task != NULL) vTaskNotifyGiveFromISR(s_impact_task, &higher_priority_task_woken);
-    if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
+    /* Tap receipt is telemetry only; detection always follows INT2 samples. */
+    note_tap_interrupt_from_isr();
 }

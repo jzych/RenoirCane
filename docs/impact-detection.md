@@ -1,0 +1,92 @@
+# Shared impact detection
+
+Normal and calibration firmware consume the LIS2DW12 INT2 data-ready stream
+at the configured 800 Hz. Both call `impact_process_sample()` in
+`components/impact` with the acquired sample and `bluetooth_audio_start_impact`.
+INT1 hardware taps never gate a cue.
+
+The shared function uses the magnitude of the configured axis, including
+`-32768` as magnitude `32768`. The inclusive software threshold remains
+`APP_IMPACT_THRESHOLD_RAW = 4500` (2.196 g using the configured sensitivity).
+One candidate is evaluated on a transition from below to at/above threshold;
+the signal must fall below threshold to rearm, including after a skipped cue.
+Changing sign while above threshold does not rearm detection.
+
+The refractory interval remains `APP_IMPACT_REFRACTORY_MS = 200`. A crossing
+within that interval is skipped without attempting playback. A crossing at
+the exact end of the interval is eligible. As in the previous calibration
+path, every eligible crossing starts refractory, including a playback attempt
+that reports busy or disconnected. Refractory skips do not extend the interval.
+
+For an eligible crossing, the shared function attempts actual Bluetooth
+playback and reports processed, audio-busy, or audio-unavailable. Calibration
+emits a green processed marker only for playback-started; every other candidate
+emits a yellow skipped marker. Below-threshold samples and held crossings emit
+no event. The graph's existing metadata threshold is the same software value
+used in normal operation. Disconnect/error results are skipped, not audio-busy.
+
+The sampling task owns sensor output reads in each mode. Normal diagnostic
+logging reuses detection samples. Calibration tap diagnostics also reuse the
+sample stream instead of reading a second sample that could consume data-ready.
+GPIO handlers are installed before enabling INT2 routing; stale output is
+drained before routing so startup does not wait forever on an already-high pin.
+
+## Telemetry and compatibility
+
+Protocol version 1 and its packed counters retain their meanings:
+
+| Counter | Meaning |
+| --- | --- |
+| `int1_received` | Hardware tap interrupts received (diagnostic only). |
+| `tap_confirmed` | Pending tap interrupt confirmed by the sensor status. |
+| `threshold_rejected` | Confirmed hardware tap whose associated fresh sample is below the software threshold. This is a tap diagnostic, not a count of ordinary below-threshold stream samples. |
+| `refractory_skipped` | Stream threshold crossings skipped during refractory. |
+| `audio_busy_skipped` | Eligible stream crossings whose playback attempt reports busy. |
+| `event_packets_sent` | Successfully transmitted processed/skipped event packets. |
+| `event_queue_dropped` | Event packets dropped because the event queue is full. |
+
+Tap interrupts are latched, so multiple interrupts pending before servicing can
+coalesce for confirmation, as with the previous notification-based tap task.
+A stream crossing can produce a cue without advancing either tap counter.
+Normal mode disables INT1 routing because it has no tap telemetry consumer.
+
+The hardware tap threshold is derived from the software threshold and rounded
+down to the available FS/32 step, clamped to 1..31. At the current +/-16 g
+range it is code 4, or 2 g; the exact 2.196 g threshold still belongs to the
+software detector. The hardware tap axis follows the configured impact axis.
+See ST's [LIS2DW12 application note, AN5038](https://www.st.com/resource/en/application_note/an5038-lis2dw12-alwayson-3d-accelerometer-stmicroelectronics.pdf)
+for tap threshold quantization.
+
+## Verification
+
+Run `python3 tools/test_standby.py` on Linux/WSL for native sensor, power,
+Bluetooth, and Unity regressions. Unity coverage exercises the shared function
+at exact positive/negative threshold and signed saturation, held crossings,
+refractory skips and the exact boundary, busy playback and rearming, and
+disconnected/error results. The native sensor test checks interrupt setup
+ordering and the derived diagnostic tap threshold. A native calibration-task
+test injects an interrupt during sensor acquisition and verifies it waits for
+the next sample, retries after read failure, and maintains markers/counters
+without a second output reader. Build both firmware modes
+and the `tinypico_test` Unity image with the pinned PlatformIO environment.
+
+On 2026-10-20, both firmware modes and the Unity device image built successfully,
+all 42 Unity tests
+passed on the native runner, and the native sensor, calibration-task, standby,
+and Bluetooth regressions passed. Independent review's logging-throughput and
+tap/sample-ordering findings were corrected and re-reviewed with no remaining
+actionable findings. Calibration app tests passed (63), as did audio tests (6).
+No task-5 firmware has been uploaded during this work; the device-image build
+used `--without-uploading --without-testing` and did not run tests on hardware.
+
+Physical acceptance remains pending:
+
+- Compare 20 deliberate impacts between normal and calibration builds, using
+  the same speaker connection and threshold. Audible cues should correspond to
+  green markers, with one cue per accepted crossing.
+- Walk normally for one minute in each build and verify no cues or green
+  markers.
+- Confirm the app threshold line matches the level that triggers a cue in
+  normal mode; verify skipped markers while audio is busy.
+
+Host tests and firmware builds cannot establish these physical results.

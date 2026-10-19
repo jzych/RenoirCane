@@ -24,6 +24,8 @@ typedef unsigned portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED 0
 #define portENTER_CRITICAL(lock) ((void)(lock))
 #define portEXIT_CRITICAL(lock) ((void)(lock))
+#define portENTER_CRITICAL_ISR(lock) ((void)(lock))
+#define portEXIT_CRITICAL_ISR(lock) ((void)(lock))
 #define pdTRUE 1
 #define pdFALSE 0
 #define pdPASS 1
@@ -36,6 +38,7 @@ void vTaskNotifyGiveFromISR(TaskHandle_t, BaseType_t *);
 uint32_t ulTaskNotifyTake(BaseType_t, TickType_t);
 void vTaskDelay(TickType_t);
 void vTaskDelete(TaskHandle_t);
+TickType_t xTaskGetTickCount(void);
 int64_t esp_timer_get_time(void);
 
 typedef uint32_t EventBits_t;

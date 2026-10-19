@@ -575,6 +575,110 @@ void test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_ski
     TEST_ASSERT_FALSE(error.audio_busy_skipped);
 }
 
+static bt_audio_play_result_t s_test_playback_result;
+static unsigned s_test_playback_calls;
+
+static bt_audio_play_result_t test_start_playback(void) {
+    ++s_test_playback_calls;
+    return s_test_playback_result;
+}
+
+static void init_sample_processor(void) {
+    impact_config_t config = {.axis = APP_IMPACT_AXIS_Y, .threshold_raw = 4500, .refractory_ms = 200};
+    impact_init(&config);
+    s_test_playback_result = BT_AUDIO_PLAY_STARTED;
+    s_test_playback_calls = 0;
+}
+
+static impact_candidate_result_t process_y(int16_t y, int64_t timestamp_us, impact_event_t *event) {
+    accel_sample_t sample = {.y = y, .timestamp_us = timestamp_us};
+    return impact_process_sample(&sample, test_start_playback, event);
+}
+
+void test_shared_impact_processor_accepts_exact_threshold_and_signed_saturation(void) {
+    const int16_t values[] = {4500, -4500, INT16_MAX, INT16_MIN};
+    const uint32_t magnitudes[] = {4500U, 4500U, 32767U, 32768U};
+    for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+        init_sample_processor();
+        impact_event_t event;
+        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(values[i], 1, &event));
+        TEST_ASSERT_EQUAL_UINT32(magnitudes[i], event.axis_abs_raw);
+        TEST_ASSERT_EQUAL_INT64(1, event.timestamp_us);
+        TEST_ASSERT_EQUAL_INT16(values[i], event.sample.y);
+        TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    }
+}
+
+void test_shared_impact_processor_ignores_below_threshold_and_other_axes(void) {
+    init_sample_processor();
+    impact_event_t event;
+    accel_sample_t sample = {.x = INT16_MAX, .y = 4499, .z = INT16_MIN, .timestamp_us = 1};
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                      impact_process_sample(&sample, test_start_playback, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(-4499, 2, &event));
+    TEST_ASSERT_EQUAL_UINT32(0, s_test_playback_calls);
+}
+
+void test_shared_impact_processor_plays_once_per_crossing(void) {
+    init_sample_processor();
+    impact_event_t event;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1000000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(INT16_MAX, 1300000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(INT16_MIN, 1400000, &event));
+    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(4499, 1400001, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-4500, 1400002, &event));
+    TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
+}
+
+void test_shared_impact_processor_skips_refractory_and_accepts_exact_boundary(void) {
+    init_sample_processor();
+    impact_event_t event;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1000000, &event));
+    (void)process_y(0, 1000001, &event);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_REFRACTORY, process_y(4500, 1199999, &event));
+    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    (void)process_y(0, 1199999, &event);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1200000, &event));
+    TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
+}
+
+void test_shared_impact_processor_reports_audio_busy_without_replaying_held_crossing(void) {
+    init_sample_processor();
+    impact_event_t event;
+    s_test_playback_result = BT_AUDIO_PLAY_BUSY;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_AUDIO_BUSY, process_y(4500, 1000000, &event));
+    TEST_ASSERT_EQUAL_INT64(1000000, event.timestamp_us);
+    s_test_playback_result = BT_AUDIO_PLAY_STARTED;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(4500, 1300000, &event));
+    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    (void)process_y(0, 1300001, &event);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1300002, &event));
+    TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
+}
+
+void test_shared_impact_processor_preserves_refractory_after_busy_attempt(void) {
+    init_sample_processor();
+    impact_event_t event;
+    s_test_playback_result = BT_AUDIO_PLAY_BUSY;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_AUDIO_BUSY, process_y(4500, 1000000, &event));
+    (void)process_y(0, 1000001, &event);
+    s_test_playback_result = BT_AUDIO_PLAY_STARTED;
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_REFRACTORY, process_y(4500, 1199999, &event));
+    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+}
+
+void test_shared_impact_processor_never_marks_disconnected_or_failed_playback_processed(void) {
+    const bt_audio_play_result_t results[] = {BT_AUDIO_PLAY_DISCONNECTED, BT_AUDIO_PLAY_ERROR};
+    for (unsigned i = 0; i < sizeof(results) / sizeof(results[0]); ++i) {
+        init_sample_processor();
+        s_test_playback_result = results[i];
+        impact_event_t event;
+        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_AUDIO_UNAVAILABLE, process_y(4500, 1, &event));
+        TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    }
+}
+
 void app_main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_cobs_round_trip_preserves_zero_bytes);
@@ -612,5 +716,12 @@ void app_main(void) {
     RUN_TEST(test_bluetooth_policy_defers_manual_reconnect_until_the_connected_speaker_disconnects);
     RUN_TEST(test_bluetooth_policy_requests_disconnect_when_a_pending_connect_completes);
     RUN_TEST(test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped);
+    RUN_TEST(test_shared_impact_processor_accepts_exact_threshold_and_signed_saturation);
+    RUN_TEST(test_shared_impact_processor_ignores_below_threshold_and_other_axes);
+    RUN_TEST(test_shared_impact_processor_plays_once_per_crossing);
+    RUN_TEST(test_shared_impact_processor_skips_refractory_and_accepts_exact_boundary);
+    RUN_TEST(test_shared_impact_processor_reports_audio_busy_without_replaying_held_crossing);
+    RUN_TEST(test_shared_impact_processor_preserves_refractory_after_busy_attempt);
+    RUN_TEST(test_shared_impact_processor_never_marks_disconnected_or_failed_playback_processed);
     UNITY_END();
 }

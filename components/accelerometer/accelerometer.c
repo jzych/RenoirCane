@@ -48,14 +48,28 @@ static bool install_isr_service(void) {
     return true;
 }
 
+static bool configure_tap_diagnostics(void) {
+    /* AN5038: TAP_THS steps are FS/32. Round down so this coarse diagnostic
+       threshold does not sit above the exact software threshold. */
+    uint32_t threshold = (uint32_t)(APP_IMPACT_THRESHOLD_RAW * APP_ACCEL_SENSITIVITY_MG_LSB
+                                   * 32.0f / (APP_ACCEL_RANGE_G * 1000.0f));
+    if (threshold < 1U) threshold = 1U;
+    if (threshold > 31U) threshold = 31U;
+    uint8_t axis_enable = (uint8_t)(0x80U >> APP_IMPACT_ACTIVE_AXIS);
+    return write_register(LIS2DW12_TAP_THS_X, (uint8_t)threshold) &&
+           write_register(LIS2DW12_TAP_THS_Y, (uint8_t)threshold) &&
+           write_register(LIS2DW12_TAP_THS_Z, (uint8_t)threshold | axis_enable) &&
+           write_register(LIS2DW12_INT_DUR, 0x06);
+}
+
 bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
     i2c_config_t i2c = {.mode = I2C_MODE_MASTER, .sda_io_num = APP_I2C_SDA_GPIO, .scl_io_num = APP_I2C_SCL_GPIO, .sda_pullup_en = GPIO_PULLUP_ENABLE, .scl_pullup_en = GPIO_PULLUP_ENABLE, .master.clk_speed = APP_I2C_FREQ_HZ};
     if (i2c_param_config(APP_I2C_PORT, &i2c) != ESP_OK || i2c_driver_install(APP_I2C_PORT, i2c.mode, 0, 0, 0) != ESP_OK) return false;
     uint8_t identity = 0;
     if (!read_register(LIS2DW12_WHO_AM_I, &identity, 1) || identity != LIS2DW12_WHO_AM_I_VALUE) { ESP_LOGE(TAG, "WHO_AM_I=0x%02x", identity); return false; }
     if (!write_register(LIS2DW12_CTRL1, 0x84) || !write_register(LIS2DW12_CTRL2, 0x0C) || !write_register(LIS2DW12_CTRL3, 0x10) || !write_register(LIS2DW12_CTRL6, 0x30) ||
-        !write_register(LIS2DW12_TAP_THS_X, 0x00) || !write_register(LIS2DW12_TAP_THS_Y, 0x08) || !write_register(LIS2DW12_TAP_THS_Z, 0x40) || !write_register(LIS2DW12_INT_DUR, 0x06) ||
-        !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, 0x40) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
+        !configure_tap_diagnostics() ||
+        !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, irq_callback != NULL ? 0x40 : 0x00) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
     s_callback = irq_callback;
     gpio_config_t gpio = {.pin_bit_mask = 1ULL << APP_ACCEL_INT1_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_POSEDGE};
     if (gpio_config(&gpio) != ESP_OK || !install_isr_service() || gpio_isr_handler_add(APP_ACCEL_INT1_GPIO, accel_isr, NULL) != ESP_OK) return false;
@@ -64,9 +78,14 @@ bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
 }
 
 bool accelerometer_set_data_ready_callback(accelerometer_irq_callback_t callback) {
+    if (!write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x00)) return false;
     s_data_ready_callback = callback;
     gpio_config_t gpio = {.pin_bit_mask = 1ULL << APP_ACCEL_INT2_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_POSEDGE};
-    return write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01) && gpio_config(&gpio) == ESP_OK && install_isr_service() && gpio_isr_handler_add(APP_ACCEL_INT2_GPIO, data_ready_isr, NULL) == ESP_OK;
+    if (gpio_config(&gpio) != ESP_OK || !install_isr_service() || gpio_isr_handler_add(APP_ACCEL_INT2_GPIO, data_ready_isr, NULL) != ESP_OK) return false;
+    /* Clear a stale data-ready level before routing it. The ISR must already
+       be installed when routing is enabled, including at first startup. */
+    accel_sample_t initial_sample;
+    return accelerometer_read_sample(&initial_sample) && write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01);
 }
 
 void accelerometer_prepare_for_sleep(void) {
