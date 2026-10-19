@@ -18,6 +18,11 @@
 #define APP_LED_POWER_GPIO GPIO_NUM_13
 #define APP_BAT_CHARGE_GPIO GPIO_NUM_34
 #define APP_SLEEP_BUTTON_GPIO GPIO_NUM_33
+/* Latching switch: ON shorts GPIO33 to GND; OFF is open/high. Set to 0
+   (or build with -DAPP_FEATURE_SLEEP_SWITCH=0) on boards without a switch. */
+#ifndef APP_FEATURE_SLEEP_SWITCH
+#define APP_FEATURE_SLEEP_SWITCH 1
+#endif
 #define APP_SLEEP_BUTTON_DEBOUNCE_MS 50U
 #define APP_SLEEP_BT_SHUTDOWN_TIMEOUT_MS 10000U
 #define APP_SLEEP_ENTER_LED_MS 500U

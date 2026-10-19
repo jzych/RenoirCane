@@ -462,15 +462,19 @@ void test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconne
     TEST_ASSERT_FALSE(bluetooth_audio_policy_should_connect(&policy, disconnected_at_us + 2000001));
 }
 
-void test_power_button_requires_a_low_post_debounce_sample_and_consumes_the_press(void) {
-    power_button_t button;
-    power_button_init(&button);
-    TEST_ASSERT_FALSE(power_button_confirm_press(&button, true));
-    power_button_note_falling_edge(&button);
-    TEST_ASSERT_FALSE(power_button_confirm_press(&button, false));
-    power_button_note_falling_edge(&button);
-    TEST_ASSERT_TRUE(power_button_confirm_press(&button, true));
-    TEST_ASSERT_FALSE(power_button_confirm_press(&button, true));
+void test_power_switch_sleeps_after_stable_off_and_on_cancels_debounce(void) {
+    power_switch_debounce_t state;
+    power_switch_debounce_init(&state);
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 0));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 1000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 50999));
+    TEST_ASSERT_TRUE(power_switch_should_sleep(&state, true, 51000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 52000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 60000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, false, 80000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 90000));
+    TEST_ASSERT_FALSE(power_switch_should_sleep(&state, true, 139999));
+    TEST_ASSERT_TRUE(power_switch_should_sleep(&state, true, 140000));
 }
 
 void test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request(void) {
@@ -601,7 +605,7 @@ void app_main(void) {
     RUN_TEST(test_bluetooth_policy_restarts_media_after_remote_suspend);
     RUN_TEST(test_bluetooth_policy_ignores_a_late_start_ack_after_disconnect);
     RUN_TEST(test_bluetooth_policy_reconnects_at_the_exact_delay_boundary_after_disconnect);
-    RUN_TEST(test_power_button_requires_a_low_post_debounce_sample_and_consumes_the_press);
+    RUN_TEST(test_power_switch_sleeps_after_stable_off_and_on_cancels_debounce);
     RUN_TEST(test_bluetooth_policy_alternates_the_attempted_speaker_after_each_connection_request);
     RUN_TEST(test_bluetooth_policy_retries_the_same_speaker_after_an_immediate_connection_failure);
     RUN_TEST(test_bluetooth_policy_retries_immediately_after_a_manual_reconnect_during_connecting_fails);

@@ -1,13 +1,13 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
-/* Task-local state; the GPIO ISR only sends a task notification. */
+/* Stable OFF (GPIO high) requests sleep; ON (GPIO low) cancels the timer. */
 typedef struct {
-    bool debounce_pending;
-} power_button_t;
+    bool off_pending;
+    int64_t off_since_us;
+} power_switch_debounce_t;
 
-void power_button_init(power_button_t *button);
-void power_button_note_falling_edge(power_button_t *button);
-/* Called by the task after the debounce delay, with the current pin level. */
-bool power_button_confirm_press(power_button_t *button, bool pin_is_low);
+void power_switch_debounce_init(power_switch_debounce_t *state);
+bool power_switch_should_sleep(power_switch_debounce_t *state, bool pin_is_high, int64_t now_us);

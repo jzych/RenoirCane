@@ -2,110 +2,93 @@
 
 ## Goal
 
-Put the normal firmware into low-power standby after a deliberate GPIO33
-button press, and wake it with a second press without changing calibration
-mode, impact detection, or Bluetooth speaker-selection policy.
+Use the GPIO33 latching switch as a power-state selector: OFF sleeps and ON
+runs the normal firmware. This corrects the original momentary-button
+interpretation following hardware feedback and the user's explicit choice on
+2026-10-20.
 
-## Hardware Contract
+## Hardware and configuration
 
-GPIO33 is an optional, active-low momentary switch: the switch connects the
-pin to GND when pressed. Firmware enables GPIO33's internal pull-up, so an
-unfitted switch reads high rather than floating. GPIO33 is an RTC-capable pin
-and is the EXT0 deep-sleep wake source.
+ON connects GPIO33 to GND (low); OFF opens it and the internal pull-up reads
+high. `APP_FEATURE_SLEEP_SWITCH` defaults to `1` for the fitted-switch build.
+On boards without a fitted switch, set `APP_FEATURE_SLEEP_SWITCH=0` (in
+configuration or as a build flag). That build does not configure GPIO33 or
+start the power task and remains awake. OFF and an absent switch are
+electrically indistinguishable, so explicit configuration is required.
 
-## Sleep Model
+## Runtime behavior
 
-The firmware uses deep sleep. It gives the required low standby current and
-has an unambiguous wake path: wake resets the ESP32 and execution restarts at
-`app_main`. Normal startup then initializes the accelerometer and Bluetooth;
-the existing Bluetooth policy performs its usual speaker reconnect.
+The power task samples the GPIO33 level every 10 ms. ON/low cancels the
+standby debounce and keeps normal operation running indefinitely. OFF/high
+for 50 ms requests standby, including when OFF is already present at startup.
+No interrupt, edge, extra ON toggle, or release is needed to enter sleep.
 
-The new `power` component owns the normal-mode button interrupt and standby
-sequence:
+After accepting OFF, the power component:
 
-1. Configure GPIO33 as an input with its internal pull-up and a falling-edge
-   interrupt.
-2. Deliver the interrupt to a dedicated power task. After 50 ms, accept it
-   only if GPIO33 remains low. This debounces a physical press and rejects a
-   transient low level.
-3. Show amber for 500 ms, stop audio and request Bluetooth shutdown, and wait
-   up to 10 seconds. This covers the known ~5.3-second JBL A2DP opening delay
-   while still guaranteeing a stuck radio cannot prevent standby indefinitely.
-4. Put the LIS2DW12 into its power-down mode, turn the LED fully off, wait for
-   GPIO33 to return high, arm EXT0 wake on GPIO33 low, and enter deep sleep.
+1. Shows amber for 500 ms and then turns the LED off.
+2. Calls the one-shot Bluetooth shutdown API, stopping PCM playback and new
+   retries. An opening connection is allowed to finish before disconnecting.
+   A 10-second bound covers the known JBL delay; timeout is logged and sleep
+   still follows.
+3. Disables accelerometer interrupts and writes LIS2DW12 CTRL1 ODR = 0.
+4. Enables the GPIO33 RTC pull-up, disables its pull-down, retains RTC
+   peripherals, and holds LED power GPIO13 high.
+5. Enters deep sleep with EXT0 wake on GPIO33 low.
 
-Waiting for release prevents the original press from satisfying the level-based
-EXT0 wake condition and producing a boot loop. The debounce plus internal
-pull-up means an unfitted button does not request standby.
+ON/low wakes through `app_main`, shows cyan for 200 ms, restores normal
+startup, and stays awake while ON remains low. If the user returns ON during
+shutdown, the level wake can happen immediately after deep-sleep entry; the
+new boot stays awake rather than looping back to sleep.
 
-## Component Boundaries
+## Component boundaries
 
-`components/power` exposes `power_init()` to start the GPIO33 interrupt and
-power task. Its only responsibility is translating a deliberate button press
-into the ordered standby sequence.
+- `power` owns level polling, OFF debounce, and standby sequencing.
+  `power_is_entering_standby()` prevents normal sampling during shutdown.
+- `bluetooth_audio_shutdown(uint32_t timeout_ms)` owns the one-shot radio
+  lifecycle gate and bounded physical disconnect. Bluetooth policy files,
+  speaker alternation and manual-reconnect behavior remain unchanged.
+- `accelerometer_prepare_for_sleep()` owns sensor interrupt disabling and
+  power-down register writes.
+- `status_led` gives standby indication priority over late Bluetooth status,
+  retains LED-off power during sleep, and releases its pad hold at startup.
 
-`components/bluetooth` adds a narrow `bluetooth_audio_shutdown(timeout_ms)`
-lifecycle API. It stops PCM playback, suppresses fresh connection attempts,
-and disconnects the configured speaker. If an A2DP connection is opening, it
-waits for the connection callback and then disconnects the established link,
-matching the safety rule introduced in task 3. It signals completion on the
-disconnect callback; expiry of the timeout is logged and standby continues.
-This API must not change `bluetooth_audio_policy.*`, speaker alternation, or
-retry mechanics.
-
-`components/accelerometer` adds `accelerometer_prepare_for_sleep()`, which
-writes the LIS2DW12 power-down ODR setting before deep sleep. It does not
-alter impact classification or calibration sampling behavior.
-
-Although task 4 originally listed only the new `power` component plus main,
-configuration, and LED files, these two lifecycle APIs are necessary narrow
-extensions: neither clean Bluetooth disconnect nor accelerometer power-down
-is currently available to a new component.
-
-## LED Contract
+## LED contract
 
 | State | Indication |
 | --- | --- |
-| Entering standby | Amber for 500 ms |
-| In deep sleep | LED power disabled (off) |
-| Waking from GPIO33 EXT0 | Cyan for 200 ms, then normal Bluetooth status |
+| OFF accepted / entering standby | Amber for 500 ms |
+| Standby | LED power disabled (off) |
+| ON waking from EXT0 | Cyan for 200 ms, then normal Bluetooth status |
 
-Power-on boot retains the existing boot indication. Existing connecting,
-ready, playing, and error colors remain unchanged.
+Normal power-on boot retains the existing boot indication. Existing connecting,
+ready, playing and error colors remain unchanged.
 
-## Reconnect Cadence
+## Reconnect cadence and calibration
 
-Set `APP_BT_RECONNECT_MS` to `2000U`. This changes the normal Bluetooth retry
-cadence to two seconds; it does not change the policy's alternation, immediate
-failure behavior, or manual-reconnect semantics. The policy tests must assert
-the exact new boundary through the application configuration value.
+`APP_BT_RECONNECT_MS = 2000U`. Retry selection, manual reconnect and media
+policy are otherwise unchanged. Calibration mode does not initialize power
+handling and ignores the switch.
 
-## Calibration Mode
+## Failure handling
 
-When `CALIBRATION_MODE=1`, `main.c` continues to call only
-`calibration_mode_start()`. It neither initializes the power component nor
-configures GPIO33, so standby is unsupported as required.
-
-## Failure Handling
-
-GPIO setup or power-task creation failure is logged and shown as the existing
-error LED state. A Bluetooth-shutdown timeout is logged but does not block
-deep sleep indefinitely. Deep sleep is still safe because it stops the CPU and
-radio; on wake, initialization starts from a clean boot.
+GPIO setup or task-creation failure is logged and shows the normal error LED.
+Wake-source configuration is checked before normal services stop. A Bluetooth
+shutdown timeout cannot prevent sleep indefinitely. A final RTC pin setup
+failure logs reset-required and stops rather than entering sleep with an
+invalid wake path.
 
 ## Verification
 
-Automated tests cover the accepted/debounced button transition and verify that
-the reconnect policy observes the two-second configuration boundary without
-changing speaker alternation. The existing Unity suite remains green.
+Native runtime tests cover held ON, OFF at startup without an edge, ON-to-OFF,
+OFF bounce, ON during shutdown, and a disabled-switch build. The debounce
+boundary is verified at 49,999 / 50,000 microseconds, and the Bluetooth retry
+boundary at 1,999,999 / 2,000,000 microseconds. The complete Unity suite runs
+on the host and the TinyPICO.
 
-Hardware verification records:
+Hardware acceptance requires OFF -> amber/off/sleep and ON -> cyan/normal
+operation, remaining awake while ON is held. A build with switch support
+disabled must run for five minutes with GPIO33 unconnected. Record measured
+idle-connected and standby battery currents and require at least a 5x ratio.
+Speaker recovery and a subsequent real impact cue also remain required.
 
-- idle-connected and standby battery current, demonstrating at least 5x
-  reduction;
-- button entry, button wake, speaker reconnect, and a subsequent impact cue;
-- 5 minutes of normal use with GPIO33 unconnected, with no standby entry;
-- observed amber/off/cyan LED indications and their durations.
-
-The measured current values, final deep-sleep/pull configuration, and LED
-results are appended to `.tasks/database.md` after hardware validation.
+All work remains on the feature branch; merge requires explicit user consent.

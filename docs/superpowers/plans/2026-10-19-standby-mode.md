@@ -12,6 +12,15 @@
 
 ## Global Constraints
 
+**Input-mode correction, 2026-10-20:** the user has a latching switch and
+explicitly selected configured-switch behavior. The momentary/edge/release
+steps below record the original implementation and are superseded by this
+correction and the updated spec. With `APP_FEATURE_SLEEP_SWITCH=1` (default),
+ON/low stays awake; OFF/high for 50 ms sleeps, even at startup. Poll every
+10 ms; no edge or release wait is required. Set the feature to `0` on boards
+without a switch. Tests cover held ON, OFF at startup, ON-to-OFF, bounce,
+ON during shutdown and the disabled build.
+
 - GPIO33 is active-low, connected to GND when pressed, and uses its internal pull-up.
 - A press is valid only when the pin is still low after 50 ms; release before deep sleep prevents EXT0 wake loops.
 - Use deep sleep, EXT0 wake on GPIO33 low, amber 500 ms on entry, LED off in standby, and cyan 200 ms after an EXT0 wake.

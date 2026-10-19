@@ -1,15 +1,20 @@
 #include "power_button.h"
 
-void power_button_init(power_button_t *button) {
-    button->debounce_pending = false;
+#include "app_config.h"
+
+void power_switch_debounce_init(power_switch_debounce_t *state) {
+    state->off_pending = false;
+    state->off_since_us = 0;
 }
 
-void power_button_note_falling_edge(power_button_t *button) {
-    button->debounce_pending = true;
-}
-
-bool power_button_confirm_press(power_button_t *button, bool pin_is_low) {
-    bool accepted = button->debounce_pending && pin_is_low;
-    button->debounce_pending = false;
-    return accepted;
+bool power_switch_should_sleep(power_switch_debounce_t *state, bool pin_is_high, int64_t now_us) {
+    if (!pin_is_high) {
+        state->off_pending = false;
+        return false;
+    }
+    if (!state->off_pending) {
+        state->off_pending = true;
+        state->off_since_us = now_us;
+    }
+    return now_us - state->off_since_us >= (int64_t)APP_SLEEP_BUTTON_DEBOUNCE_MS * 1000;
 }
