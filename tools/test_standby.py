@@ -17,9 +17,13 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     includes = [TEST / "stubs"] + [
         ROOT / "components" / name / "include"
-        for name in ("app_config", "power", "bluetooth")
+        for name in ("app_config", "power", "bluetooth", "audio", "accelerometer", "status_led")
     ]
     suites = {
+        "power": [TEST / "test_power.c", ROOT / "components/power/power_button.c"],
+        "accelerometer": [TEST / "test_accelerometer.c"],
+        "bluetooth": [TEST / "test_bluetooth.c", ROOT / "components/audio/audio.c",
+                      ROOT / "components/bluetooth/bluetooth_audio_policy.c"],
         "button": [TEST / "test_button.c", ROOT / "components/power/power_button.c",
                    ROOT / "components/bluetooth/bluetooth_audio_policy.c"],
     }

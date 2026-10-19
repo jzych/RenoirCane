@@ -69,6 +69,18 @@ bool accelerometer_set_data_ready_callback(accelerometer_irq_callback_t callback
     return write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01) && gpio_config(&gpio) == ESP_OK && install_isr_service() && gpio_isr_handler_add(APP_ACCEL_INT2_GPIO, data_ready_isr, NULL) == ESP_OK;
 }
 
+void accelerometer_prepare_for_sleep(void) {
+    (void)gpio_intr_disable(APP_ACCEL_INT1_GPIO);
+    (void)gpio_intr_disable(APP_ACCEL_INT2_GPIO);
+    bool int1_disabled = write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, 0x00);
+    bool int2_disabled = write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x00);
+    /* ODR=0000 selects power-down regardless of the previous operating mode. */
+    bool powered_down = write_register(LIS2DW12_CTRL1, 0x00);
+    if (!int1_disabled || !int2_disabled || !powered_down) {
+        ESP_LOGW(TAG, "LIS2DW12 standby preparation failed");
+    }
+}
+
 bool accelerometer_read_sample(accel_sample_t *sample) {
     uint8_t raw[6];
     if (sample == NULL || !read_register(LIS2DW12_OUT_X_L, raw, sizeof(raw))) return false;
