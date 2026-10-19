@@ -53,6 +53,9 @@ Hardware validation remains pending: the TinyPICO/CH9102 is not currently
 connected. The detected USB serial devices are STM32 devices; no firmware was
 uploaded to those ports.
 
+Use the same battery supply with USB unplugged for both current measurements;
+record serial observations separately so charging cannot skew the comparison.
+
 - [ ] Run the Unity suite on the TinyPICO, then restore `tinypico` firmware.
 - [ ] Measure idle-connected battery current: pending.
 - [ ] Measure deep-sleep battery current: pending; require at least a 5x
