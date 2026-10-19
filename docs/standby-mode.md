@@ -75,8 +75,10 @@ record serial observations separately so charging cannot skew the comparison.
 - [ ] Measure idle-connected battery current: pending.
 - [ ] Measure deep-sleep battery current: pending; require at least a 5x
   reduction (`idle current / standby current >= 5`).
-- [ ] Observe OFF -> amber/off/sleep and ON -> cyan/normal operation; verify
-  that holding ON stays awake and OFF at startup sleeps without another toggle.
+- [x] Observe OFF -> amber/off/sleep and ON -> cyan/normal operation; verify
+  that holding ON stays awake (user confirmed; serial log captured two cycles).
+- [ ] Separately power up with the switch already OFF and observe sleep without
+  another toggle (covered by native runtime regression; physical check pending).
 - [ ] Verify speaker reconnection and a full cue after a real impact.
 - [ ] With `APP_FEATURE_SLEEP_SWITCH=0`, leave GPIO33 unconnected during
   5 minutes of normal use; verify no standby request in the serial log.
@@ -97,8 +99,11 @@ host and on COM4. Both normal/calibration builds passed. The corrected normal
 firmware was restored with verified flash hashes after device testing. A
 read-only review of `4b92a88..ca7b344` found no actionable defects.
 
-The initial corrected-firmware capture shows normal startup and continuing
-samples while ON is held. Confirmation of the revised OFF/sleep -> ON/awake
-cycle, speaker/cue behavior, current readings and disabled-switch unconnected
-observation remains pending. Serial evidence is in local
+The corrected-firmware capture shows OFF accepted at uptime 42457 ms, sleep at
+42957 ms, then a deep-sleep reset/wake. A second OFF was accepted 3537 ms after
+wake and sleep logged at 6547 ms, followed by another wake. Samples continued
+with ON held. The user confirmed amber/off for OFF and cyan/normal operation
+for ON without sleeping again. Speaker/cue behavior, current readings,
+physical power-up-already-OFF and disabled-switch unconnected observation
+remain pending. Serial evidence is in local
 `.pio/latching-switch-live.log` and `.pio/latching-device-check.log`.

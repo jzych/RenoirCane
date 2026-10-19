@@ -264,4 +264,6 @@ disabled-switch, sensor, Bluetooth and 35-test Unity checks passed. Both firmwar
 builds passed. All 35 updated device Unity tests passed on COM4, then the normal
 firmware was restored with flash-hash verification. Read-only review of
 `4b92a88..ca7b344` found no actionable defects. The revised manual switch cycle
-and remaining physical acceptance checks are still pending.
+is confirmed by two logged OFF/sleep -> ON/wake cycles and the user's LED/held-ON
+confirmation. Battery current, speaker/cue, physical startup-already-OFF and
+disabled-switch unconnected observation remain pending.
