@@ -175,7 +175,7 @@ git commit -m "feat: enter standby from GPIO33 button"
 - Consumes the flashed `tinypico` firmware from Task 3 and a GPIO33-to-GND momentary switch.
 - Produces recorded measurements and a completed task-state entry.
 
-- [ ] **Step 1: Flash normal firmware and run automated regression checks**
+- [x] **Step 1: Flash normal firmware and run automated regression checks**
 
 Run: `& 'C:\Users\jzych\.platformio\penv\Scripts\pio.exe' run -e tinypico -t upload --upload-port COM4; & 'C:\Users\jzych\.platformio\penv\Scripts\pio.exe' test -e tinypico_test --upload-port COM4 --test-port COM4`
 
@@ -227,9 +227,14 @@ Execution refinements:
 - The existing Windows calibration-app venv cannot launch its Microsoft Store
   Python interpreter. No calibration-app source was changed.
 
-Task 4 remains pending physical access: the port inventory contains Bluetooth
-and STM32 devices, but no TinyPICO/CH9102. No other device was flashed and no
-current measurements or physical button/LED results have been invented.
+Task 4 hardware verification resumed after the TinyPICO appeared on COM4:
+CH9102, ESP32-PICO-D4, MAC `0c:8b:95:aa:85:f8`. All 35 device Unity tests passed;
+normal standby firmware was restored with flash-hash verification. A 25-second
+boot observation confirmed normal startup, LIS2DW12 samples, no reset loop or
+standby entry, and retry requests 2050 ms after failures. Speaker connection
+attempts timed out. Current measurements, physical button/LED/wake behavior,
+an audible cue, and the full five-minute unconnected-button observation remain
+pending. No other device was flashed and no missing results were invented.
 Decisions are recorded in the shared local `.tasks/database.md` and tracked
 `docs/standby-mode.md`. Local task state remains `last_completed: 3`,
 `in_progress: 4`, with the feature branch named. Merge requires explicit

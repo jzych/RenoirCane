@@ -49,14 +49,21 @@ python -m unittest discover -s test/test_audio_asset -v
 
 ## Physical acceptance checklist
 
-Hardware validation remains pending: the TinyPICO/CH9102 is not currently
-connected. The detected USB serial devices are STM32 devices; no firmware was
-uploaded to those ports.
+TinyPICO was identified on COM4 (CH9102, ESP32-PICO-D4, MAC
+`0c:8b:95:aa:85:f8`) on 2026-10-19. All 35 Unity tests passed on the device;
+normal `tinypico` standby firmware was then restored and its flash hash verified.
+Startup detected the LIS2DW12 at 0x19 and continuously reported accelerometer
+samples during a 25-second serial observation, without a reset loop or standby
+entry. Both configured speaker attempts timed out; the next attempts started
+2050 ms after the disconnected events, consistent with the configured 2000 ms
+interval and 50 ms worker polling. Speaker connection and cue playback are
+still unverified. No firmware was uploaded to the STM32 devices on COM6/COM8.
 
 Use the same battery supply with USB unplugged for both current measurements;
 record serial observations separately so charging cannot skew the comparison.
 
-- [ ] Run the Unity suite on the TinyPICO, then restore `tinypico` firmware.
+- [x] Run the Unity suite on the TinyPICO, then restore `tinypico` firmware
+  (35 passed, 0 failed).
 - [ ] Measure idle-connected battery current: pending.
 - [ ] Measure deep-sleep battery current: pending; require at least a 5x
   reduction (`idle current / standby current >= 5`).
