@@ -256,3 +256,12 @@ they do not establish measured current or actual dual-core timing. On a final
 RTC setup error the firmware logs that reset is required. Existing Bluetooth
 API-error recovery remains outside task 4. Deep sleep remains the approved
 bounded fallback after disconnect timeout.
+
+### Latching-switch correction verification (2026-10-20)
+
+The user-selected correction is committed as `ca7b344`. Native switch runtime,
+disabled-switch, sensor, Bluetooth and 35-test Unity checks passed. Both firmware
+builds passed. All 35 updated device Unity tests passed on COM4, then the normal
+firmware was restored with flash-hash verification. Read-only review of
+`4b92a88..ca7b344` found no actionable defects. The revised manual switch cycle
+and remaining physical acceptance checks are still pending.

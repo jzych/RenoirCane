@@ -84,3 +84,21 @@ record serial observations separately so charging cannot skew the comparison.
 Record measured values and outcomes in `.tasks/database.md` after testing.
 Task 4 stays in progress until these checks pass. Keep the feature branch for
 review; merging requires the user's explicit consent.
+
+## Latching-switch correction verification (2026-10-20)
+
+Hardware feedback showed the original momentary-button mode alternately slept
+and woke on ON while ignoring OFF. That mode is superseded by the level-based
+behavior documented above; the user explicitly selected configured-switch mode.
+
+The correction passed native held-ON, OFF-at-startup, ON-to-OFF, bounce,
+ON-during-shutdown, and disabled-switch tests, plus all 35 Unity tests on the
+host and on COM4. Both normal/calibration builds passed. The corrected normal
+firmware was restored with verified flash hashes after device testing. A
+read-only review of `4b92a88..ca7b344` found no actionable defects.
+
+The initial corrected-firmware capture shows normal startup and continuing
+samples while ON is held. Confirmation of the revised OFF/sleep -> ON/awake
+cycle, speaker/cue behavior, current readings and disabled-switch unconnected
+observation remains pending. Serial evidence is in local
+`.pio/latching-switch-live.log` and `.pio/latching-device-check.log`.
