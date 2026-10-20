@@ -28,6 +28,8 @@ def main():
     suites = {
         "calibration_mode": [TEST / "test_calibration_mode.c"],
         "calibration_log": [TEST / "test_calibration_log.c"],
+        "status_led": [TEST / "test_status_led.c", ROOT / "components/audio/audio.c",
+                       ROOT / "components/audio/impact_pcm.S"],
         "power": [TEST / "test_power.c", ROOT / "components/power/power_button.c"],
         "power_disabled": [TEST / "test_power.c", ROOT / "components/power/power_button.c"],
         "accelerometer": [TEST / "test_accelerometer.c"],
@@ -50,11 +52,11 @@ def main():
     for name, sources in suites.items():
         executable = BUILD / (name + (".exe" if os.name == "nt" else ""))
         command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror"]
-        if name == "calibration_log":
+        if name in ("calibration_log", "status_led"):
             command += ["-pthread"]
         if name in ("power", "power_disabled"):
             command += ["-DAPP_FEATURE_SLEEP_SWITCH=" + ("0" if name == "power_disabled" else "1")]
-        if name == "unity":
+        if name in ("unity", "status_led"):
             asset = (ROOT / "components/audio/impact.pcm").as_posix()
             command += ['-DPCM_ASSET_PATH="' + asset + '"']
             if os.name != "nt":
@@ -63,6 +65,8 @@ def main():
         command += [str(path) for path in sources] + ["-o", str(executable)]
         subprocess.run(command, check=True)
         subprocess.run([str(executable)], check=True)
+        if name == "status_led":
+            subprocess.run([str(executable), "allocation-failure"], check=True)
 
 
 if __name__ == "__main__":

@@ -14,25 +14,6 @@
 
 static const char *TAG = "CAL_MODE";
 
-static void bluetooth_state_changed(bt_audio_state_t state) {
-    switch (state) {
-        case BT_AUDIO_CONNECTING:
-            status_led_set(STATUS_LED_BT_CONNECTING);
-            break;
-        case BT_AUDIO_CONNECTED:
-            status_led_set(STATUS_LED_READY);
-            break;
-        case BT_AUDIO_STREAMING:
-            status_led_set(STATUS_LED_PLAYING);
-            break;
-        case BT_AUDIO_ERROR:
-            status_led_set(STATUS_LED_ERROR);
-            break;
-        case BT_AUDIO_DISABLED:
-            break;
-    }
-}
-
 void calibration_mode_start(void) {
     status_led_init();
     status_led_set(STATUS_LED_BOOT);
@@ -51,7 +32,7 @@ void calibration_mode_start(void) {
         status_led_set(STATUS_LED_ERROR);
         return;
     }
-    if (bluetooth_audio_init(bluetooth_state_changed)) {
+    if (bluetooth_audio_init(status_led_on_bluetooth_state)) {
         bluetooth_audio_start();
     } else {
         status_led_set(STATUS_LED_ERROR);

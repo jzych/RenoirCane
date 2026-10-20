@@ -15,6 +15,8 @@ static bool led_held, rtc_pull, rtc_pd_disabled, rtc_kept_on, ext0_enabled, sens
 static unsigned levels[40], shift_count;
 static uint8_t shifted[16];
 
+bool audio_is_active(void) { return false; }
+
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack, void *arg,
                       UBaseType_t priority, TaskHandle_t *out) {
     (void)name; (void)stack; (void)arg; (void)priority;
