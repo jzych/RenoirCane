@@ -49,19 +49,17 @@ static void impact_task(void *arg) {
     (void)arg;
     int64_t last_diagnostic_us = 0;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t taps = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
         if (power_is_entering_standby()) continue;
         accel_sample_t sample;
         impact_event_t event;
-        if (!accelerometer_read_sample(&sample)) continue;
-        impact_candidate_result_t result = impact_process_sample(&sample, bluetooth_audio_start_impact, &event);
-        /* Accepted cues are bounded by refractory; logging every rejected
-           crossing can saturate the console and stall the sample stream. */
+        bool tap_confirmed;
+        if (!impact_read_sample(taps != 0U, &sample, &tap_confirmed)) continue;
+        impact_candidate_result_t result = impact_process_sample(&sample, tap_confirmed, bluetooth_audio_start_impact, &event);
         if (result == IMPACT_CANDIDATE_PROCESSED) {
             ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z);
         }
-        /* Reuse the detection sample: a second reader can clear data-ready
-           before the detector has consumed the peak. */
+        /* The same task owns tap reads and once-per-second diagnostics. */
         if (sample.timestamp_us - last_diagnostic_us >= 1000000) {
             ESP_LOGI("ACCEL", "x=%d y=%d z=%d", sample.x, sample.y, sample.z);
             last_diagnostic_us = sample.timestamp_us;
@@ -94,8 +92,8 @@ void app_main(void) {
         status_led_set(STATUS_LED_ERROR);
     }
     impact_init(&config);
-    if (xTaskCreate(impact_task, "impact", 3072, NULL, 8, &s_impact_task) != pdPASS ||
-        !accelerometer_init(NULL) || !accelerometer_set_data_ready_callback(impact_irq_notify)) {
+    if (xTaskCreate(impact_task, "impact", 3072, NULL, 6, &s_impact_task) != pdPASS ||
+        !accelerometer_init(impact_irq_notify)) {
         status_led_set(STATUS_LED_ERROR);
         ESP_LOGE(TAG, "accelerometer initialization failed");
     }

@@ -105,6 +105,14 @@ void test_packet_decode_rejects_an_unknown_protocol_version(void) {
     TEST_ASSERT_FALSE(calibration_packet_decode(encoded, length, raw, sizeof(raw), &packet));
 }
 
+void test_packet_decode_rejects_legacy_stream_detection_counter_semantics(void) {
+    uint8_t frame[32], scratch[32];
+    calibration_packet_view_t packet;
+    const uint8_t unused_payload = 0;
+    size_t length = encode_raw_packet(1U, 0U, &unused_payload, 0U, 0U, frame, sizeof(frame));
+    TEST_ASSERT_FALSE(calibration_packet_decode(frame, length, scratch, sizeof(scratch), &packet));
+}
+
 void test_packet_decode_rejects_a_declared_length_that_does_not_match_the_frame(void) {
     const uint8_t payload[] = {0xAA, 0xBB, 0xCC};
     uint8_t encoded[32];
@@ -585,10 +593,15 @@ static void init_sample_processor(void) {
 
 static impact_candidate_result_t process_y(int16_t y, int64_t timestamp_us, impact_event_t *event) {
     accel_sample_t sample = {.y = y, .timestamp_us = timestamp_us};
-    return impact_process_sample(&sample, test_start_playback, event);
+    return impact_process_sample(&sample, true, test_start_playback, event);
 }
 
-void test_configured_impact_processor_rejects_light_contact_and_accepts_strong_impact(void) {
+static impact_candidate_result_t process_y_without_tap(int16_t y, int64_t timestamp_us, impact_event_t *event) {
+    accel_sample_t sample = {.y = y, .timestamp_us = timestamp_us};
+    return impact_process_sample(&sample, false, test_start_playback, event);
+}
+
+void test_configured_impact_processor_requires_tap_and_restores_original_software_threshold(void) {
     init_sample_processor();
     impact_config_t config = {.axis = APP_IMPACT_ACTIVE_AXIS,
                               .threshold_raw = APP_IMPACT_THRESHOLD_RAW,
@@ -596,16 +609,18 @@ void test_configured_impact_processor_rejects_light_contact_and_accepts_strong_i
     impact_init(&config);
     impact_event_t event;
 
-    /* Earlier unwanted cue, then captured sideways/light-contact peaks and boundaries. */
-    const int16_t rejected[] = {-5668, -9964, -10708, -18424, -9828, 20499, -20499};
+    /* Captured peaks must not bypass hardware classification, even at saturation. */
+    const int16_t rejected[] = {-5668, -9964, -10708, -18424, -9828, -25928, -25684, -21860, INT16_MIN, INT16_MAX};
     for (unsigned i = 0; i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
-        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
-                          process_y(rejected[i], 1000000 + (int64_t)i * 10000, &event));
+        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_NO_TAP,
+                          process_y_without_tap(rejected[i], 1000000 + (int64_t)i * 10000, &event));
     }
     TEST_ASSERT_EQUAL_UINT32(0, s_test_playback_calls);
 
-    /* Three labelled normal-contact peaks, then the inclusive signed boundaries. */
-    const int16_t accepted[] = {-29352, -26264, -32732, 20500, -20500};
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(4499, 1500000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(-4499, 1600000, &event));
+    /* Post-tap sample validation uses the original inclusive4500 threshold. */
+    const int16_t accepted[] = {4500, -4500, -29352, -26264, -32732};
     for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
         int64_t timestamp_us = 2000000 + (int64_t)i * 300000;
         TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(accepted[i], timestamp_us, &event));
@@ -633,19 +648,19 @@ void test_shared_impact_processor_ignores_below_threshold_and_other_axes(void) {
     impact_event_t event;
     accel_sample_t sample = {.x = INT16_MAX, .y = 4499, .z = INT16_MIN, .timestamp_us = 1};
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
-                      impact_process_sample(&sample, test_start_playback, &event));
+                      impact_process_sample(&sample, true, test_start_playback, &event));
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(-4499, 2, &event));
     TEST_ASSERT_EQUAL_UINT32(0, s_test_playback_calls);
 }
 
-void test_shared_impact_processor_plays_once_per_crossing(void) {
+void test_shared_impact_processor_requires_a_new_tap_for_another_cue(void) {
     init_sample_processor();
     impact_event_t event;
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1000000, &event));
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(INT16_MAX, 1300000, &event));
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(INT16_MIN, 1400000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_NO_TAP, process_y_without_tap(INT16_MAX, 1300000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_NO_TAP, process_y_without_tap(INT16_MIN, 1400000, &event));
     TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(4499, 1400001, &event));
+    /* A separate confirmed tap is independent of the last sample's level. */
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-4500, 1400002, &event));
     TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
 }
@@ -662,14 +677,14 @@ void test_shared_impact_processor_skips_refractory_and_accepts_exact_boundary(vo
     TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
 }
 
-void test_shared_impact_processor_reports_audio_busy_without_replaying_held_crossing(void) {
+void test_shared_impact_processor_reports_audio_busy_and_waits_for_another_tap(void) {
     init_sample_processor();
     impact_event_t event;
     s_test_playback_result = BT_AUDIO_PLAY_BUSY;
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_AUDIO_BUSY, process_y(4500, 1000000, &event));
     TEST_ASSERT_EQUAL_INT64(1000000, event.timestamp_us);
     s_test_playback_result = BT_AUDIO_PLAY_STARTED;
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(4500, 1300000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_NO_TAP, process_y_without_tap(4500, 1300000, &event));
     TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
     (void)process_y(0, 1300001, &event);
     TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(4500, 1300002, &event));
@@ -706,6 +721,7 @@ void app_main(void) {
     RUN_TEST(test_packet_decode_accepts_a_well_formed_packet_built_by_the_test_helper);
     RUN_TEST(test_packet_decode_rejects_a_crc_mismatch);
     RUN_TEST(test_packet_decode_rejects_an_unknown_protocol_version);
+    RUN_TEST(test_packet_decode_rejects_legacy_stream_detection_counter_semantics);
     RUN_TEST(test_packet_decode_rejects_a_declared_length_that_does_not_match_the_frame);
     RUN_TEST(test_packet_decode_rejects_short_frames_invalid_cobs_and_small_scratch_buffers);
     RUN_TEST(test_impact_telemetry_packet_round_trip_preserves_all_counters);
@@ -719,7 +735,7 @@ void app_main(void) {
     RUN_TEST(test_audio_stop_cancels_active_pcm_playback);
     RUN_TEST(test_audio_impact_finishes_after_one_second_of_pcm_without_transport_preroll);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
-    RUN_TEST(test_configured_impact_processor_rejects_light_contact_and_accepts_strong_impact);
+    RUN_TEST(test_configured_impact_processor_requires_tap_and_restores_original_software_threshold);
     RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
     RUN_TEST(test_bluetooth_policy_stops_requesting_after_a_connection_callback);
     RUN_TEST(test_bluetooth_policy_keeps_media_started_while_connected);
@@ -737,9 +753,9 @@ void app_main(void) {
     RUN_TEST(test_calibration_playback_mapping_marks_only_busy_results_as_audio_busy_skipped);
     RUN_TEST(test_shared_impact_processor_accepts_exact_threshold_and_signed_saturation);
     RUN_TEST(test_shared_impact_processor_ignores_below_threshold_and_other_axes);
-    RUN_TEST(test_shared_impact_processor_plays_once_per_crossing);
+    RUN_TEST(test_shared_impact_processor_requires_a_new_tap_for_another_cue);
     RUN_TEST(test_shared_impact_processor_skips_refractory_and_accepts_exact_boundary);
-    RUN_TEST(test_shared_impact_processor_reports_audio_busy_without_replaying_held_crossing);
+    RUN_TEST(test_shared_impact_processor_reports_audio_busy_and_waits_for_another_tap);
     RUN_TEST(test_shared_impact_processor_preserves_refractory_after_busy_attempt);
     RUN_TEST(test_shared_impact_processor_never_marks_disconnected_or_failed_playback_processed);
     UNITY_END();

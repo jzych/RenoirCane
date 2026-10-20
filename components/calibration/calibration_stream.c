@@ -60,17 +60,6 @@ static bool take_pending_tap(void) {
     return pending;
 }
 
-static void capture_tap_diagnostics(const accel_sample_t *sample) {
-    bool tap_candidate = accelerometer_read_impact_status();
-    accelerometer_clear_interrupt();
-    if (tap_candidate) {
-        impact_telemetry_increment(&s_impact_telemetry.tap_confirmed);
-        if (!impact_sample_exceeds_threshold(sample)) {
-            impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
-        }
-    }
-}
-
 static calibration_impact_telemetry_v1_t impact_telemetry_snapshot(void) {
     impact_telemetry_counters_t counters;
     portENTER_CRITICAL(&s_impact_telemetry_lock);
@@ -114,10 +103,14 @@ static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payl
     return length != 0U && uart_write_bytes(UART_NUM_0, encoded, length) == (int)length;
 }
 
-static void emit_impact_outcome(const accel_sample_t *sample) {
+static void emit_impact_outcome(const accel_sample_t *sample, bool tap_confirmed) {
     impact_event_t candidate;
-    impact_candidate_result_t result = impact_process_sample(sample, bluetooth_audio_start_impact, &candidate);
-    if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) return;
+    impact_candidate_result_t result = impact_process_sample(sample, tap_confirmed, bluetooth_audio_start_impact, &candidate);
+    if (result == IMPACT_CANDIDATE_NO_TAP) return;
+    if (result == IMPACT_CANDIDATE_BELOW_THRESHOLD) {
+        impact_telemetry_increment(&s_impact_telemetry.threshold_rejected);
+        return;
+    }
 
     calibration_impact_event_v1_t event = {
         .timestamp_us = (uint32_t)candidate.timestamp_us,
@@ -139,21 +132,15 @@ static void sample_task(void *arg) {
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        /* Only diagnose taps that preceded this read. An interrupt arriving
-           during the read must wait for the next fresh stream sample. */
+        /* A tap arriving during acquisition belongs to the next read. */
         bool tap_pending = take_pending_tap();
         accel_sample_t raw;
-        bool sample_read = accelerometer_read_sample(&raw);
-        if (!sample_read) {
-            if (tap_pending) {
-                portENTER_CRITICAL(&s_impact_telemetry_lock);
-                s_tap_pending = true;
-                portEXIT_CRITICAL(&s_impact_telemetry_lock);
-            }
-            continue;
-        }
-        emit_impact_outcome(&raw);
-        if (tap_pending) capture_tap_diagnostics(&raw);
+        bool tap_confirmed;
+        bool sample_read = impact_read_sample(tap_pending, &raw, &tap_confirmed);
+        if (tap_confirmed) impact_telemetry_increment(&s_impact_telemetry.tap_confirmed);
+        /* A failed post-tap read consumes that tap, just as in old normal mode. */
+        if (!sample_read) continue;
+        emit_impact_outcome(&raw, tap_confirmed);
         calibration_sample_t sample = {
             .seq = s_next_sequence++,
             .timestamp_us = (uint32_t)raw.timestamp_us,
@@ -228,6 +215,10 @@ void IRAM_ATTR calibration_stream_on_data_ready_from_isr(void) {
 }
 
 void IRAM_ATTR calibration_stream_on_impact_from_isr(void) {
-    /* Tap receipt is telemetry only; detection always follows INT2 samples. */
     note_tap_interrupt_from_isr();
+    /* Wake immediately for the same post-tap read as normal mode, including
+       when INT2 has no new notification yet. */
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (s_sample_task != NULL) vTaskNotifyGiveFromISR(s_sample_task, &higher_priority_task_woken);
+    if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
 }

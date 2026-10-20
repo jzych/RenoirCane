@@ -1,59 +1,70 @@
 # Shared impact detection
 
-Normal and calibration firmware consume the LIS2DW12 INT2 data-ready stream
-at the configured 800 Hz. Both call `impact_process_sample()` in
-`components/impact` with the acquired sample and `bluetooth_audio_start_impact`.
-INT1 hardware taps never gate a cue.
+Normal and calibration firmware use the original normal-mode tap-gated path.
+Both call `impact_read_sample()` in `components/impact`: for a pending INT1
+interrupt it confirms the sensor tap status, clears the latch, then reads the
+sample in that order. Both pass the acquired sample and confirmation flag to
+`impact_process_sample()` with `bluetooth_audio_start_impact`.
 
 The shared function uses the magnitude of the configured axis, including
 `-32768` as magnitude `32768`. The inclusive software threshold is
-`APP_IMPACT_THRESHOLD_RAW = 20500` (10.004 g using the configured sensitivity).
-One candidate is evaluated on a transition from below to at/above threshold;
-the signal must fall below threshold to rearm, including after a skipped cue.
-Changing sign while above threshold does not rearm detection.
+`APP_IMPACT_THRESHOLD_RAW = 4500` (2.196 g using the configured sensitivity),
+restored from the working normal firmware. An unconfirmed sample cannot
+request playback, even at saturation. A distinct confirmed tap does not need
+an intervening below-threshold sample; the hardware tap engine supplies the
+event gate. The threshold-crossing classifier remains available for isolated
+algorithm tests but does not decide production cues.
 
-The refractory interval remains `APP_IMPACT_REFRACTORY_MS = 200`. A crossing
-within that interval is skipped without attempting playback. A crossing at
-the exact end of the interval is eligible. As in the previous calibration
-path, every eligible crossing starts refractory, including a playback attempt
+The refractory interval remains `APP_IMPACT_REFRACTORY_MS = 200`. A tap candidate
+within that interval is skipped without attempting playback. A candidate at
+the exact end of the interval is eligible. As in the original normal
+path, every eligible candidate starts refractory, including a playback attempt
 that reports busy or disconnected. Refractory skips do not extend the interval.
 
-For an eligible crossing, the shared function attempts actual Bluetooth
+For an eligible tap, the shared function attempts actual Bluetooth
 playback and reports processed, audio-busy, or audio-unavailable. Calibration
 emits a green processed marker only for playback-started; every other candidate
-emits a yellow skipped marker. Below-threshold samples and held crossings emit
-no event. The graph's existing metadata threshold is the same software value
-used in normal operation. Disconnect/error results are skipped, not audio-busy.
+emits a yellow skipped marker. Unconfirmed and below-threshold samples emit
+no event. The graph's metadata threshold is the same post-tap software value
+used in normal operation; a graph peak alone is insufficient to trigger a cue.
+Disconnect/error results are skipped, not audio-busy.
 
-The sampling task owns sensor output reads in each mode. Normal diagnostic
-logging reuses detection samples. Calibration tap diagnostics also reuse the
-sample stream instead of reading a second sample that could consume data-ready.
-GPIO handlers are installed before enabling INT2 routing; stale output is
-drained before routing so startup does not wait forever on an already-high pin.
+One task owns sensor output reads in each mode. Normal mode wakes on INT1,
+with a one-second timeout for diagnostics, and retains its original task
+priority 6. Calibration keeps the INT2 graph stream at the configured 800 Hz;
+INT1 also wakes its sampling task immediately for post-tap acquisition. A tap
+arriving during a read belongs to the next read. A failed post-tap acquisition
+consumes the cleared tap, matching original normal behavior; it cannot arm an
+unrelated later stream sample. GPIO handlers are installed before interrupt
+routing. Stale INT1 latches are cleared, and stale INT2 output is drained.
 
 ## Telemetry and compatibility
 
-Protocol version 1 and its packed counters retain their meanings:
+Firmware and app now use protocol version 2. Packet layouts remain unchanged;
+the version distinguishes tap-candidate skip counters from the previous
+stream-crossing skip counters. A version-1 calibration app must be updated
+alongside the firmware. Metadata sample-format version remains 1.
 
 | Counter | Meaning |
 | --- | --- |
-| `int1_received` | Hardware tap interrupts received (diagnostic only). |
+| `int1_received` | Hardware tap interrupts received. |
 | `tap_confirmed` | Pending tap interrupt confirmed by the sensor status. |
-| `threshold_rejected` | Confirmed hardware tap whose associated fresh sample is below the software threshold. This is a tap diagnostic, not a count of ordinary below-threshold stream samples. |
-| `refractory_skipped` | Stream threshold crossings skipped during refractory. |
-| `audio_busy_skipped` | Eligible stream crossings whose playback attempt reports busy. |
+| `threshold_rejected` | Confirmed tap whose valid post-tap sample is below the software threshold. Ordinary stream lows do not count. |
+| `refractory_skipped` | Above-threshold, confirmed tap candidates skipped during refractory. |
+| `audio_busy_skipped` | Eligible tap candidates whose playback attempt reports busy. |
 | `event_packets_sent` | Successfully transmitted processed/skipped event packets. |
 | `event_queue_dropped` | Event packets dropped because the event queue is full. |
 
 Tap interrupts are latched, so multiple interrupts pending before servicing can
 coalesce for confirmation, as with the previous notification-based tap task.
-A stream crossing can produce a cue without advancing either tap counter.
-Normal mode disables INT1 routing because it has no tap telemetry consumer.
+A cue always requires a confirmed tap; both modes enable INT1 routing.
 
-The hardware tap threshold is derived from the software threshold and rounded
-down to the available FS/32 step, clamped to 1..31. At the current +/-16 g
-range it is code 20, or 10 g; the exact 10.004 g threshold still belongs to the
-software detector. The hardware tap axis follows the configured impact axis.
+The original hardware tap profile is restored exactly: `TAP_THS_X=0x00`,
+`TAP_THS_Y=0x08`, `TAP_THS_Z=0x40`, and `INT_DUR=0x06`, with Y tap detection
+enabled. At +/-16 g, the hardware gate is 4 g. This is intentionally separate
+from the original 2.196 g software check on the later post-tap sample. Deriving
+the hardware gate from 4500 raw would lower it to 2 g and change the working
+normal-mode behavior again.
 See ST's [LIS2DW12 application note, AN5038](https://www.st.com/resource/en/application_note/an5038-lis2dw12-alwayson-3d-accelerometer-stmicroelectronics.pdf)
 for tap threshold quantization.
 
@@ -61,13 +72,14 @@ for tap threshold quantization.
 
 Run `python3 tools/test_standby.py` on Linux/WSL for native sensor, power,
 Bluetooth, and Unity regressions. Unity coverage exercises the shared function
-at exact positive/negative threshold and signed saturation, held crossings,
-refractory skips and the exact boundary, busy playback and rearming, and
-disconnected/error results. The native sensor test checks interrupt setup
-ordering and the derived diagnostic tap threshold. A native calibration-task
-test injects an interrupt during sensor acquisition and verifies it waits for
-the next sample, retries after read failure, and maintains markers/counters
-without a second output reader. Build both firmware modes
+at exact positive/negative threshold and signed saturation, missing tap
+confirmation, distinct taps without software rearming, refractory boundaries,
+busy playback, and disconnected/error results. The native sensor test checks
+interrupt setup ordering and the original tap registers. The native
+calibration-task test checks status/clear/read ordering, immediate INT1 wake,
+an interrupt arriving during acquisition, failed-read tap consumption, and
+markers/counters with one output reader. Both decoders reject legacy protocol
+frames. Build both firmware modes
 and the `tinypico_test` Unity image with the pinned PlatformIO environment.
 
 On 2026-10-20, both firmware modes and the Unity device image built successfully,
@@ -84,7 +96,7 @@ Physical acceptance remains pending:
 
 - Compare 20 deliberate impacts between normal and calibration builds, using
   the same speaker connection and threshold. Audible cues should correspond to
-  green markers, with one cue per accepted crossing.
+  green markers, with one cue per accepted tap.
 - Walk normally for one minute in each build and verify no cues or green
   markers.
 - Confirm the app threshold line matches the level that triggers a cue in
@@ -250,3 +262,23 @@ This is a small-sample diagnostic calculation, not an implemented filter.
 Adding confirmation would introduce up to 100 ms of decision latency and
 requires a new design decision; no change beyond the approved 10 g threshold
 has been made to production firmware.
+
+### Restoring the working normal detector
+
+The user clarified that normal firmware before task 5 worked without unwanted
+triggers, and approved preserving that path in both modes. Comparison with
+`f1c8064` showed that task 5 had removed its hardware tap gate. In the first
+labelled capture, hardware tap counters advanced only around the three normal
+hits, not the sideways hit or three light contacts. The correction above
+restores that gate, exact hardware profile, original software threshold, and
+post-tap read order. CPU1 I2C isolation and malformed-frame rejection remain.
+The proposed burst-strength filter was not implemented.
+
+A native calibration-task regression first reproduced an ungated saturation
+sample incorrectly requesting playback, then passed with tap gating. All 43
+native Unity tests, sensor/sampling-task/power/Bluetooth regressions, and 64
+calibration-app tests pass. Both firmware modes and the Unity device image
+built successfully. The device image was built without uploading or running
+device tests. Review's protocol-version finding was corrected and re-reviewed
+with no remaining actionable issues. Live verification of the restored path
+and the full normal/calibration physical comparison remain pending.

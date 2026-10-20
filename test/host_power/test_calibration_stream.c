@@ -10,6 +10,10 @@
 static jmp_buf task_finished;
 static unsigned waits, reads, playback_calls, events, tap_status_reads;
 static bool interrupt_during_read, fail_read, drop_event;
+static bool hardware_tap;
+static unsigned tap_notifications;
+static char io_order[32];
+static unsigned io_count;
 static accel_sample_t next_sample;
 static bt_audio_play_result_t playback_result;
 static calibration_impact_event_v1_t last_event;
@@ -20,7 +24,11 @@ BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
     if (out) *out = (void *)3;
     return pdPASS;
 }
-void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken) { (void)task; *woken = pdFALSE; }
+void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken) {
+    assert(task == s_sample_task);
+    ++tap_notifications;
+    *woken = pdFALSE;
+}
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait) {
     (void)clear; (void)wait;
     if (waits++ > 0) longjmp(task_finished, 1);
@@ -59,15 +67,20 @@ int uart_read_bytes(int port, void *buffer, uint32_t length, TickType_t wait) {
 int uart_write_bytes(int port, const void *buffer, size_t length) { (void)port; (void)buffer; return (int)length; }
 bool accelerometer_read_sample(accel_sample_t *sample) {
     ++reads;
-    *sample = next_sample;
+    io_order[io_count++] = 'R';
+    if (!fail_read) *sample = next_sample;
     if (interrupt_during_read) {
         interrupt_during_read = false;
         calibration_stream_on_impact_from_isr();
     }
     return !fail_read;
 }
-bool accelerometer_read_impact_status(void) { ++tap_status_reads; return true; }
-void accelerometer_clear_interrupt(void) {}
+bool accelerometer_read_impact_status(void) {
+    ++tap_status_reads;
+    io_order[io_count++] = 'S';
+    return hardware_tap;
+}
+void accelerometer_clear_interrupt(void) { io_order[io_count++] = 'C'; }
 bt_audio_play_result_t bluetooth_audio_start_impact(void) { ++playback_calls; return playback_result; }
 
 static void reset(void) {
@@ -79,17 +92,30 @@ static void reset(void) {
     s_samples_dropped = 0;
     reads = playback_calls = events = tap_status_reads = 0;
     interrupt_during_read = fail_read = drop_event = false;
+    hardware_tap = true;
+    tap_notifications = 0;
     playback_result = BT_AUDIO_PLAY_STARTED;
     assert(calibration_stream_start());
 }
 
 static void feed(int16_t y, int64_t timestamp_us) {
     next_sample = (accel_sample_t){.y = y, .timestamp_us = timestamp_us};
+    memset(io_order, 0, sizeof(io_order));
+    io_count = 0;
     waits = 0;
     if (setjmp(task_finished) == 0) sample_task(NULL);
 }
 
 int main(void) {
+    reset();
+    feed(-32768, 1000000); /* A stream spike cannot bypass the hardware tap gate. */
+    assert(playback_calls == 0 && events == 0);
+    assert(strcmp(io_order, "R") == 0);
+    calibration_stream_on_impact_from_isr();
+    feed(4500, 1000001); /* Ungated spikes must not consume refractory. */
+    assert(playback_calls == 1 && events == 1);
+    assert(strcmp(io_order, "SCR") == 0); /* The old normal-mode read order. */
+
     reset();
     interrupt_during_read = true;
     feed(4499, 1);
@@ -97,49 +123,65 @@ int main(void) {
     assert(s_impact_telemetry.tap_confirmed == 0);
     assert(s_impact_telemetry.threshold_rejected == 0);
     assert(tap_status_reads == 0); /* A new IRQ cannot classify a pre-IRQ sample. */
+    assert(tap_notifications == 1);
     feed(4499, 2);
     assert(s_impact_telemetry.tap_confirmed == 1);
     assert(s_impact_telemetry.threshold_rejected == 1);
     assert(reads == 2 && tap_status_reads == 1);
+    assert(strcmp(io_order, "SCR") == 0);
+
+    reset();
+    hardware_tap = false;
+    calibration_stream_on_impact_from_isr();
+    feed(-32768, 1);
+    assert(s_impact_telemetry.int1_received == 1 && s_impact_telemetry.tap_confirmed == 0);
+    assert(playback_calls == 0 && events == 0);
+    assert(strcmp(io_order, "SCR") == 0);
 
     reset();
     calibration_stream_on_impact_from_isr();
     fail_read = true;
     feed(4500, 1);
-    assert(s_impact_telemetry.tap_confirmed == 0 && s_samples_acquired == 0);
+    assert(s_impact_telemetry.tap_confirmed == 1 && s_samples_acquired == 0);
     assert(events == 0 && playback_calls == 0);
     fail_read = false;
-    feed(4499, 2);
+    feed(32767, 2); /* A cleared tap must not arm a later unrelated sample. */
     assert(s_impact_telemetry.int1_received == 1 && s_impact_telemetry.tap_confirmed == 1);
-    assert(s_impact_telemetry.threshold_rejected == 1 && reads == 2);
+    assert(s_impact_telemetry.threshold_rejected == 0 && reads == 2);
+    assert(playback_calls == 0 && events == 0 && tap_status_reads == 1);
 
     reset();
-    feed(4500, 1000000); /* No tap prerequisite. */
+    calibration_stream_on_impact_from_isr();
+    feed(4500, 1000000);
     assert(playback_calls == 1 && events == 1);
     assert(last_event.outcome == CAL_IMPACT_PROCESSED && last_event.timestamp_us == 1000000);
-    feed(32767, 1300000); /* Held crossing cannot repeat. */
+    feed(32767, 1300000); /* Stream values alone cannot repeat a cue. */
     assert(playback_calls == 1 && events == 1);
-    feed(0, 1300001);
+    calibration_stream_on_impact_from_isr();
+    feed(32767, 1300001); /* A distinct tap needs no software crossing/rearm. */
+    assert(playback_calls == 2 && events == 2);
     playback_result = BT_AUDIO_PLAY_BUSY;
-    feed(-32768, 1300002);
-    assert(events == 2 && last_event.outcome == CAL_IMPACT_SKIPPED);
+    calibration_stream_on_impact_from_isr();
+    feed(-32768, 1600002);
+    assert(events == 3 && last_event.outcome == CAL_IMPACT_SKIPPED);
     assert(s_impact_telemetry.audio_busy_skipped == 1);
-    feed(0, 1300003);
-    feed(4500, 1300004);
-    assert(events == 3 && playback_calls == 2);
+    feed(0, 1600003);
+    calibration_stream_on_impact_from_isr();
+    feed(4500, 1600004);
+    assert(events == 4 && playback_calls == 3);
     assert(s_impact_telemetry.refractory_skipped == 1);
-    feed(0, 1600000);
     playback_result = BT_AUDIO_PLAY_DISCONNECTED;
-    feed(4500, 1600001);
-    assert(events == 4 && last_event.outcome == CAL_IMPACT_SKIPPED);
+    calibration_stream_on_impact_from_isr();
+    feed(4500, 1900001);
+    assert(events == 5 && last_event.outcome == CAL_IMPACT_SKIPPED);
     assert(s_impact_telemetry.audio_busy_skipped == 1);
     assert(s_impact_telemetry.threshold_rejected == 0); /* Stream lows aren't tap rejections. */
-    feed(0, 1900000);
     drop_event = true;
-    feed(4500, 1900001);
+    calibration_stream_on_impact_from_isr();
+    feed(4500, 2200001);
     assert(s_impact_telemetry.event_queue_dropped == 1);
-    assert(reads == 10 && s_samples_acquired == 10); /* Exactly one output read per sample. */
+    assert(reads == 8 && s_samples_acquired == 8); /* Exactly one output read per acquisition. */
 
-    puts("PASS: stream decisions/markers, one sensor reader, deferred tap diagnostics, queue drops");
+    puts("PASS: tap-gated cues/markers, post-tap read order, one reader, immediate IRQ wake, queue drops");
     return 0;
 }

@@ -7,6 +7,7 @@
 static bool disabled[40];
 static uint8_t registers[256];
 static bool data_ready_handler_added;
+static bool tap_handler_added;
 static unsigned sample_reads;
 static int current_core;
 static bool fail_semaphore, fail_init_task, fail_driver;
@@ -59,6 +60,7 @@ esp_err_t i2c_master_write_to_device(int p, int addr, const uint8_t *data, size_
         assert(data_ready_handler_added);
         assert(sample_reads > 0); /* Drain stale output before enabling INT2. */
     }
+    if (data[0] == 0x23 && data[1] == 0x40) assert(tap_handler_added);
     registers[data[0]] = data[1]; return ESP_OK;
 }
 esp_err_t gpio_config(const gpio_config_t *cfg) { (void)cfg; return ESP_OK; }
@@ -66,6 +68,7 @@ esp_err_t gpio_install_isr_service(int flags) { (void)flags; return ESP_OK; }
 esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) {
     (void)fn; (void)arg;
     if (pin == APP_ACCEL_INT2_GPIO) data_ready_handler_added = true;
+    if (pin == APP_ACCEL_INT1_GPIO) tap_handler_added = true;
     return ESP_OK;
 }
 esp_err_t gpio_intr_disable(gpio_num_t pin) { disabled[pin] = true; return ESP_OK; }
@@ -86,21 +89,25 @@ static void expect_invalid_sample(const uint8_t raw[6]) {
     assert(sample.x == 4 && sample.y == -8 && sample.z == 12 && sample.timestamp_us == 77);
 }
 
+static void tap_callback(void) {}
+
 int main(void) {
     registers[0x0f] = 0x44;
-    assert(accelerometer_init(NULL));
+    assert(accelerometer_init(tap_callback));
     assert(registers[0x20] == 0x84);
+    assert(registers[0x23] == 0x40);
     /* Draining a malformed stale frame must not prevent INT2 from starting. */
     const uint8_t stale_raw[] = {0x00, 0x4c, 0xf8, 0x1c, 0x02, 0x02};
     memcpy(&registers[0x28], stale_raw, sizeof(stale_raw));
     assert(accelerometer_set_data_ready_callback(NULL));
     assert(registers[0x24] == 1);
-    /* 20500 raw = 10.004 g; tap diagnostics quantize down to 20 * 0.5 g. */
-    assert(registers[0x31] == 20);
+    /* Preserve the original hardware tap profile, separate from software4500. */
+    assert(registers[0x30] == 0x00 && registers[0x31] == 0x08);
+    assert(registers[0x32] == 0x40 && registers[0x33] == 0x06);
 
     /* Valid 14-bit left-aligned data: rest, exact threshold, signed limits. */
     expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02}, 196, -1984, 520);
-    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x14, 0x50, 0x08, 0x02}, 196, 20500, 520);
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x94, 0x11, 0x08, 0x02}, 196, 4500, 520);
     expect_valid_sample((const uint8_t[]){0xfc, 0x7f, 0x00, 0x80, 0x00, 0x00}, 32764, -32768, 0);
 
     /* Exact frames from three spontaneous cues while the cane was still.

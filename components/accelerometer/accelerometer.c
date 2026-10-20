@@ -83,17 +83,12 @@ static bool install_i2c_driver(void) {
     return success;
 }
 
-static bool configure_tap_diagnostics(void) {
-    /* AN5038: TAP_THS steps are FS/32. Round down so this coarse diagnostic
-       threshold does not sit above the exact software threshold. */
-    uint32_t threshold = (uint32_t)(APP_IMPACT_THRESHOLD_RAW * APP_ACCEL_SENSITIVITY_MG_LSB
-                                   * 32.0f / (APP_ACCEL_RANGE_G * 1000.0f));
-    if (threshold < 1U) threshold = 1U;
-    if (threshold > 31U) threshold = 31U;
-    uint8_t axis_enable = (uint8_t)(0x80U >> APP_IMPACT_ACTIVE_AXIS);
-    return write_register(LIS2DW12_TAP_THS_X, (uint8_t)threshold) &&
-           write_register(LIS2DW12_TAP_THS_Y, (uint8_t)threshold) &&
-           write_register(LIS2DW12_TAP_THS_Z, (uint8_t)threshold | axis_enable) &&
+static bool configure_tap_detection(void) {
+    /* Preserve the proven normal-mode tap profile: Y enabled, 4 g hardware
+       gate at +/-16 g, followed by the separate 4500-raw software check. */
+    return write_register(LIS2DW12_TAP_THS_X, 0x00) &&
+           write_register(LIS2DW12_TAP_THS_Y, 0x08) &&
+           write_register(LIS2DW12_TAP_THS_Z, 0x40) &&
            write_register(LIS2DW12_INT_DUR, 0x06);
 }
 
@@ -103,11 +98,14 @@ bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
     uint8_t identity = 0;
     if (!read_register(LIS2DW12_WHO_AM_I, &identity, 1) || identity != LIS2DW12_WHO_AM_I_VALUE) { ESP_LOGE(TAG, "WHO_AM_I=0x%02x", identity); return false; }
     if (!write_register(LIS2DW12_CTRL1, 0x84) || !write_register(LIS2DW12_CTRL2, 0x0C) || !write_register(LIS2DW12_CTRL3, 0x10) || !write_register(LIS2DW12_CTRL6, 0x30) ||
-        !configure_tap_diagnostics() ||
-        !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, irq_callback != NULL ? 0x40 : 0x00) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
+        !configure_tap_detection() ||
+        !write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, 0x00) || !write_register(LIS2DW12_CTRL7, 0x20)) return false;
     s_callback = irq_callback;
     gpio_config_t gpio = {.pin_bit_mask = 1ULL << APP_ACCEL_INT1_GPIO, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE, .intr_type = GPIO_INTR_POSEDGE};
     if (gpio_config(&gpio) != ESP_OK || !install_isr_service() || gpio_isr_handler_add(APP_ACCEL_INT1_GPIO, accel_isr, NULL) != ESP_OK) return false;
+    /* Install the handler and clear any stale latch before enabling INT1. */
+    accelerometer_clear_interrupt();
+    if (!write_register(LIS2DW12_CTRL4_INT1_PAD_CTRL, irq_callback != NULL ? 0x40 : 0x00)) return false;
     ESP_LOGI(TAG, "LIS2DW12 detected at 0x%02x; INT1=GPIO%d INT2=GPIO%d", APP_ACCEL_I2C_ADDR, APP_ACCEL_INT1_GPIO, APP_ACCEL_INT2_GPIO);
     return true;
 }
