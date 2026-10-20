@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import codecs
 import struct
 
+from app.diagnostics import diagnose
 from app.model import CalibrationModel, Sample
 from app.protocol import (
     CAL_IMPACT_PROCESSED,
     CAL_IMPACT_SKIPPED,
     CAL_PKT_IMPACT_EVENT,
     CAL_PKT_IMPACT_TELEMETRY,
+    CAL_PKT_LOG,
     CAL_PKT_METADATA,
     CAL_PKT_SAMPLE_BATCH,
     CAL_PKT_STATUS,
@@ -41,14 +44,25 @@ class CalibrationController:
         self.firmware_status = FirmwareStatus()
         self.impact_telemetry = ImpactTelemetry()
         self.bad_payload_count = 0
+        self._log_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def reset_session(self) -> None:
         self.model = CalibrationModel()
         self.firmware_status = FirmwareStatus()
         self.impact_telemetry = ImpactTelemetry()
         self.bad_payload_count = 0
+        self._log_decoder.reset()
 
     def handle_packet(self, packet: Packet) -> None:
+        if packet.packet_type == CAL_PKT_LOG:
+            text = self._log_decoder.decode(packet.payload)
+            if text:
+                try:
+                    diagnose(f"Firmware: {text}")
+                except Exception:
+                    # Optional diagnostics must not stop samples or events.
+                    pass
+            return
         try:
             if packet.packet_type == CAL_PKT_METADATA:
                 self.model.apply_metadata(packet.payload)

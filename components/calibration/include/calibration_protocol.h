@@ -17,6 +17,7 @@ typedef enum {
     CAL_PKT_ERROR = 0x04,
     CAL_PKT_IMPACT_EVENT = 0x05,
     CAL_PKT_IMPACT_TELEMETRY = 0x06,
+    CAL_PKT_LOG = 0x07,
     CAL_CMD_GET_METADATA = 0x80,
 } calibration_packet_type_t;
 

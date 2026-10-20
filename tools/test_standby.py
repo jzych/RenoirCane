@@ -26,6 +26,8 @@ def main():
     unity = ROOT / ".pio/libdeps/tinypico_test/Unity/src"
     includes.append(unity)
     suites = {
+        "calibration_mode": [TEST / "test_calibration_mode.c"],
+        "calibration_log": [TEST / "test_calibration_log.c"],
         "power": [TEST / "test_power.c", ROOT / "components/power/power_button.c"],
         "power_disabled": [TEST / "test_power.c", ROOT / "components/power/power_button.c"],
         "accelerometer": [TEST / "test_accelerometer.c"],
@@ -48,6 +50,8 @@ def main():
     for name, sources in suites.items():
         executable = BUILD / (name + (".exe" if os.name == "nt" else ""))
         command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror"]
+        if name == "calibration_log":
+            command += ["-pthread"]
         if name in ("power", "power_disabled"):
             command += ["-DAPP_FEATURE_SLEEP_SWITCH=" + ("0" if name == "power_disabled" else "1")]
         if name == "unity":

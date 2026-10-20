@@ -10,7 +10,12 @@ def _android_info(tag: str, message: str) -> None:
 
 
 def diagnose(message: str) -> None:
+    """Send best-effort diagnostics without interrupting the caller's work."""
     try:
         _android_info("CaneDiag", message)
     except Exception:
-        logging.getLogger("CaneDiag").info(message)
+        try:
+            logging.getLogger("CaneDiag").info(message)
+        except Exception:
+            # Neither sink is usable; reporting this failure could recurse.
+            pass

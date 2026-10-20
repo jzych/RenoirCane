@@ -17,6 +17,17 @@ static unsigned io_count;
 static accel_sample_t next_sample;
 static bt_audio_play_result_t playback_result;
 static calibration_impact_event_v1_t last_event;
+static bool fail_tx_drain;
+static unsigned baud_changes, drain_calls;
+static bool transport_running, log_pending;
+static unsigned transport_reads;
+static uint8_t wire[4096];
+static size_t wire_length;
+static jmp_buf transport_finished;
+static bool transport_sample_pending, transport_event_pending;
+static unsigned clock_reads;
+static uint32_t log_dropped, drops_during_write;
+static bool fail_write, short_write;
 
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
                       void *arg, UBaseType_t priority, TaskHandle_t *out) {
@@ -34,7 +45,9 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t wait) {
     if (waits++ > 0) longjmp(task_finished, 1);
     return 1;
 }
-TickType_t xTaskGetTickCount(void) { return 0; }
+TickType_t xTaskGetTickCount(void) {
+    return transport_running && clock_reads++ > 0 ? 1000 : 0;
+}
 int64_t esp_timer_get_time(void) { return next_sample.timestamp_us; }
 QueueHandle_t xQueueCreate(UBaseType_t capacity, UBaseType_t size) {
     (void)capacity;
@@ -54,17 +67,66 @@ BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickType_t wait) {
     return pdPASS;
 }
 BaseType_t xQueueReceive(QueueHandle_t queue, void *item, TickType_t wait) {
-    (void)queue; (void)item; (void)wait; return pdFALSE;
+    (void)wait;
+    if (transport_running && queue == s_sample_queue && transport_sample_pending) {
+        *(calibration_sample_t *)item = (calibration_sample_t){.seq = 10, .timestamp_us = 1000, .y_raw = 4500};
+        transport_sample_pending = false;
+        return pdPASS;
+    }
+    if (transport_running && queue == s_impact_event_queue && transport_event_pending) {
+        *(calibration_impact_event_v1_t *)item = (calibration_impact_event_v1_t){.timestamp_us = 1000, .outcome = CAL_IMPACT_PROCESSED};
+        transport_event_pending = false;
+        return pdPASS;
+    }
+    return pdFALSE;
 }
 bool uart_is_driver_installed(int port) { (void)port; return true; }
 esp_err_t uart_driver_install(int port, int rx, int tx, int size, void *queue, int flags) {
     (void)port; (void)rx; (void)tx; (void)size; (void)queue; (void)flags; return ESP_OK;
 }
-esp_err_t uart_set_baudrate(int port, uint32_t baud) { (void)port; (void)baud; return ESP_OK; }
-int uart_read_bytes(int port, void *buffer, uint32_t length, TickType_t wait) {
-    (void)port; (void)buffer; (void)length; (void)wait; return 0;
+esp_err_t uart_wait_tx_done(int port, TickType_t wait) {
+    assert(port == 0 && wait == 1000);
+    ++drain_calls;
+    return fail_tx_drain ? ESP_FAIL : ESP_OK;
 }
-int uart_write_bytes(int port, const void *buffer, size_t length) { (void)port; (void)buffer; return (int)length; }
+esp_err_t uart_set_baudrate(int port, uint32_t baud) {
+    assert(port == 0 && baud == 921600);
+    assert(drain_calls > 0 && !fail_tx_drain);
+    ++baud_changes;
+    return ESP_OK;
+}
+int uart_read_bytes(int port, void *buffer, uint32_t length, TickType_t wait) {
+    (void)port; (void)buffer; (void)length; (void)wait;
+    if (transport_running && transport_reads++ == 1) longjmp(transport_finished, 1);
+    return 0;
+}
+int uart_write_bytes(int port, const void *buffer, size_t length) {
+    assert(port == 0 && wire_length + length <= sizeof(wire));
+    log_dropped += drops_during_write;
+    drops_during_write = 0;
+    if (fail_write) return -1;
+    if (short_write) return (int)length - 1;
+    memcpy(wire + wire_length, buffer, length);
+    wire_length += length;
+    return (int)length;
+}
+size_t calibration_log_read(uint8_t *buffer, size_t capacity) {
+    const char text[] = "BT disconnected\nprintf\n";
+    if (!log_pending) return 0;
+    assert(capacity >= sizeof(text) - 1);
+    memcpy(buffer, text, sizeof(text) - 1);
+    log_pending = false;
+    return sizeof(text) - 1;
+}
+uint32_t calibration_log_take_dropped_bytes(void) {
+    uint32_t dropped = log_dropped;
+    log_dropped = 0;
+    return dropped;
+}
+void calibration_log_record_dropped_bytes(size_t count) {
+    if (count > UINT32_MAX - log_dropped) log_dropped = UINT32_MAX;
+    else log_dropped += (uint32_t)count;
+}
 bool accelerometer_read_sample(accel_sample_t *sample) {
     ++reads;
     io_order[io_count++] = 'R';
@@ -107,6 +169,10 @@ static void feed(int16_t y, int64_t timestamp_us) {
 }
 
 int main(void) {
+    fail_tx_drain = true;
+    assert(!calibration_stream_start());
+    assert(baud_changes == 0);
+    fail_tx_drain = false;
     reset();
     feed(-32768, 1000000); /* A stream spike cannot bypass the hardware tap gate. */
     assert(playback_calls == 0 && events == 0);
@@ -182,6 +248,67 @@ int main(void) {
     assert(s_impact_telemetry.event_queue_dropped == 1);
     assert(reads == 8 && s_samples_acquired == 8); /* Exactly one output read per acquisition. */
 
-    puts("PASS: tap-gated cues/markers, post-tap read order, one reader, immediate IRQ wake, queue drops");
+    wire_length = 0; transport_reads = 0;
+    clock_reads = 0;
+    s_impact_telemetry.event_packets_sent = 0;
+    transport_running = log_pending = true;
+    log_dropped = 8;
+    transport_sample_pending = transport_event_pending = true;
+    if (setjmp(transport_finished) == 0) transport_task(NULL);
+    assert(!log_pending && wire_length > 1 && wire[0] == 0);
+    uint8_t raw[CALIBRATION_MAX_RAW_PACKET];
+    calibration_packet_view_t packet;
+    unsigned packets = 0;
+    const uint8_t types[] = {1, 2, 5, 3, 6, 7};
+    for (size_t start = 1, end = 1; end < wire_length; ++end) {
+        if (wire[end] != 0) continue;
+        assert(calibration_packet_decode(wire + start, end - start, raw, sizeof(raw), &packet));
+        assert(packets < sizeof(types) && packet.packet_type == types[packets]);
+        if (packet.packet_type == 6) {
+            calibration_impact_telemetry_v1_t telemetry;
+            memcpy(&telemetry, packet.payload, sizeof(telemetry));
+            assert(telemetry.event_packets_sent == 1);
+        }
+        if (packet.packet_type == 7) {
+            const char text[] = "\n[firmware logs dropped: 8 bytes]\nBT disconnected\nprintf\n";
+            assert(packet.payload_length == sizeof(text) - 1);
+            assert(memcmp(packet.payload, text, sizeof(text) - 1) == 0);
+        }
+        ++packets;
+        start = end + 1;
+    }
+    assert(packets == 6 && !transport_sample_pending && !transport_event_pending);
+    assert(s_samples_transmitted >= 1 && s_impact_telemetry.event_packets_sent == 1);
+    /* A failed send must preserve the old notice and account for the 23 text
+       bytes consumed from the ring, including losses produced during the write. */
+    wire_length = 0;
+    log_pending = fail_write = true;
+    log_dropped = 8;
+    drops_during_write = 5;
+    emit_log_packet();
+    assert(!log_pending && log_dropped == 36 && wire_length == 0);
+    emit_log_packet(); /* A failed notice-only packet must not inflate the count. */
+    assert(log_dropped == 36);
+    fail_write = false;
+    emit_log_packet();
+    assert(log_dropped == 0 && wire_length > 0);
+    assert(calibration_packet_decode(wire, wire_length - 1, raw, sizeof(raw), &packet));
+    const char loss_notice[] = "\n[firmware logs dropped: 36 bytes]\n";
+    assert(packet.packet_type == CAL_PKT_LOG && packet.payload_length == sizeof(loss_notice) - 1);
+    assert(memcmp(packet.payload, loss_notice, sizeof(loss_notice) - 1) == 0);
+
+    wire_length = 0;
+    log_pending = short_write = true;
+    log_dropped = UINT32_MAX - 10;
+    emit_log_packet(); /* Conservatively count the whole text on a short write. */
+    assert(!log_pending && log_dropped == UINT32_MAX);
+    short_write = false;
+    emit_log_packet();
+    assert(log_dropped == 0);
+    assert(calibration_packet_decode(wire, wire_length - 1, raw, sizeof(raw), &packet));
+    const char saturated_notice[] = "\n[firmware logs dropped: 4294967295 bytes]\n";
+    assert(packet.payload_length == sizeof(saturated_notice) - 1);
+    assert(memcmp(packet.payload, saturated_notice, sizeof(saturated_notice) - 1) == 0);
+    puts("PASS: UART drain failure, delimiter/metadata/framed logs, tap-gated cues/markers and queue drops");
     return 0;
 }

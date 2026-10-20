@@ -3,6 +3,8 @@
 #include "app_config.h"
 #include "accelerometer.h"
 #include "calibration_protocol.h"
+#include "calibration_log.h"
+#include <stdio.h>
 #include "bluetooth_audio.h"
 #include "impact.h"
 #include "driver/uart.h"
@@ -103,6 +105,27 @@ static bool write_packet(uint8_t packet_type, const void *payload, uint16_t payl
     return length != 0U && uart_write_bytes(UART_NUM_0, encoded, length) == (int)length;
 }
 
+static void emit_log_packet(void) {
+    uint8_t payload[CALIBRATION_MAX_PAYLOAD];
+    size_t length = 0U;
+    uint32_t dropped = calibration_log_take_dropped_bytes();
+    if (dropped != 0U) {
+        int count = snprintf((char *)payload, sizeof(payload),
+                             "\n[firmware logs dropped: %lu bytes]\n", (unsigned long)dropped);
+        if (count > 0) length = (size_t)count;
+    }
+    /* Drain text even during continuous overflow: notices cannot starve it. */
+    size_t text_length = calibration_log_read(payload + length, sizeof(payload) - length);
+    length += text_length;
+    if (length != 0U && !write_packet(CAL_PKT_LOG, payload, (uint16_t)length)) {
+        /* Restore the unsent notice and count consumed text, not the notice's
+         * ASCII bytes. Add separately to avoid overflow before saturation and
+         * preserve any producer losses accumulated during the UART write. */
+        calibration_log_record_dropped_bytes(dropped);
+        calibration_log_record_dropped_bytes(text_length);
+    }
+}
+
 static void emit_impact_outcome(const accel_sample_t *sample, bool tap_confirmed) {
     impact_event_t candidate;
     impact_candidate_result_t result = impact_process_sample(sample, tap_confirmed, bluetooth_audio_start_impact, &candidate);
@@ -166,6 +189,8 @@ static void transport_task(void *arg) {
         .sample_format_version = 1U,
         .reserved = 0U,
     };
+    const uint8_t delimiter = 0U;
+    (void)uart_write_bytes(UART_NUM_0, &delimiter, sizeof(delimiter));
     (void)write_packet(CAL_PKT_METADATA, &metadata, sizeof(metadata));
     TickType_t last_status_tick = xTaskGetTickCount();
     for (;;) {
@@ -195,6 +220,7 @@ static void transport_task(void *arg) {
             (void)write_packet(CAL_PKT_IMPACT_TELEMETRY, &telemetry, sizeof(telemetry));
             last_status_tick = xTaskGetTickCount();
         }
+        emit_log_packet();
     }
 }
 
@@ -203,6 +229,7 @@ bool calibration_stream_start(void) {
     s_impact_event_queue = xQueueCreate(CALIBRATION_IMPACT_QUEUE_CAPACITY, sizeof(calibration_impact_event_v1_t));
     if (s_sample_queue == NULL || s_impact_event_queue == NULL) return false;
     if (!uart_is_driver_installed(UART_NUM_0) && uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0) != ESP_OK) return false;
+    if (uart_wait_tx_done(UART_NUM_0, pdMS_TO_TICKS(1000)) != ESP_OK) return false;
     if (uart_set_baudrate(UART_NUM_0, CALIBRATION_UART_BAUD_RATE) != ESP_OK) return false;
     if (xTaskCreate(sample_task, "cal_sample", 3072U, NULL, 8U, &s_sample_task) != pdPASS) return false;
     return xTaskCreate(transport_task, "cal_transport", 4096U, NULL, 7U, NULL) == pdPASS;

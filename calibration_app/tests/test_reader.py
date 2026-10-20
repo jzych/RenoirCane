@@ -1,6 +1,8 @@
 import struct
 import threading
 
+import pytest
+
 import app.diagnostics as diagnostics_module
 import app.reader as reader_module
 from app.controller import CalibrationController
@@ -74,6 +76,7 @@ class PacketStreamBackend:
     def __init__(self, data: bytes) -> None:
         self._data = data
         self._connected = True
+        self.closed = False
         self.drained = threading.Event()
 
     @property
@@ -86,6 +89,7 @@ class PacketStreamBackend:
         return self._data
 
     def close(self) -> None:
+        self.closed = True
         self._connected = False
 
 
@@ -125,3 +129,34 @@ def test_reader_survives_platform_diagnostics(monkeypatch):
 
     assert reader.error is None
     assert controller.model.graph_config is not None
+
+
+@pytest.mark.parametrize("diagnostic", ["decoded packets", "bad_packets"])
+def test_reader_dispatches_packets_when_both_diagnostic_backends_fail(monkeypatch, diagnostic):
+    def fail_android(_tag, _message):
+        raise RuntimeError("Android logging unavailable")
+
+    failed_messages = []
+
+    def fail_fallback(message):
+        if message.startswith(f"Reader {diagnostic}="):
+            failed_messages.append(message)
+            raise OSError("Diagnostic sink unavailable")
+
+    monkeypatch.setattr(diagnostics_module, "_android_info", fail_android)
+    monkeypatch.setattr(diagnostics_module.logging.getLogger("CaneDiag"), "info", fail_fallback)
+    metadata = struct.pack("<HBBhfBBBB", 800, 16, 1, 4500, 0.488, 14, 4, 1, 0)
+    corrupt = bytearray(encode_frame(CAL_PKT_METADATA, metadata))
+    corrupt[5] ^= 0x01
+    backend = PacketStreamBackend(bytes(corrupt) + encode_frame(CAL_PKT_METADATA, metadata))
+    controller = CalibrationController()
+    reader = CalibrationReader(backend, controller)
+
+    reader.start()
+    assert backend.drained.wait(timeout=1.0)
+    reader.stop()
+
+    assert reader.error is None
+    assert backend.closed is False
+    assert controller.model.graph_config.axis_label == "Y"
+    assert failed_messages == [f"Reader {diagnostic}=1"]
