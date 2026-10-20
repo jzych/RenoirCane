@@ -142,4 +142,18 @@ and requires a connected-speaker comparison to determine effectiveness here.
 
 Native tests check the actual installing core and failure cleanup. Both
 firmware builds and all 42 Unity tests pass with this change; physical
-corruption and false-cue checks are pending upload and live capture.
+verification of the CPU1 change used normal firmware commit `99b9898`, uploaded
+with verified flash hashes. Startup confirmed the I2C interrupt on CPU1.
+The first 100-second capture connected to the speaker at 21326 ms and continued
+through 99586 ms: 78.26 seconds connected, with zero malformed frames and zero
+processed impact events. A further 75-second connected capture also recorded
+zero malformed frames and zero processed events, with steady stationary
+readings. This contrasts with the guard-only capture's 27 malformed frames in
+63.65 connected seconds.
+
+These observations support retaining CPU1 isolation for this board and build;
+they do not prove the internal mechanism behind the ESP-IDF interference.
+The final manual three-impact confirmation remains pending: no deliberate
+impacts were captured in the last window. Full 20-impact/walking acceptance
+also remains pending. Local evidence is `.pio/task5-cpu1-stationary.log` and
+`.pio/task5-cpu1-impacts.log`.
