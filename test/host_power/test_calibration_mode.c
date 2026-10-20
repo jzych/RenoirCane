@@ -8,6 +8,8 @@ static char order[64];
 static size_t steps;
 static bool log_ok = true, stream_ok = true, accel_ok = true;
 static status_led_state_t led;
+static bt_audio_state_callback_t bt_callback;
+void status_led_on_bluetooth_state(bt_audio_state_t state) { (void)state; }
 static void step(char c) { order[steps++] = c; }
 bool calibration_log_init(void) { step('L'); return log_ok; }
 void status_led_init(void) { step('S'); }
@@ -16,7 +18,7 @@ void audio_init(void) { step('A'); }
 void impact_init(const impact_config_t *config) { assert(config); step('I'); }
 bool calibration_stream_start(void) { step('T'); return stream_ok; }
 bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
-    assert(callback); step('B'); return true;
+    assert(callback); bt_callback = callback; step('B'); return true;
 }
 void bluetooth_audio_start(void) { step('b'); }
 bool accelerometer_init(accelerometer_irq_callback_t callback) {
@@ -32,6 +34,7 @@ static void run(void) { steps = 0; memset(order, 0, sizeof(order)); calibration_
 int main(void) {
     run();
     assert(strcmp(order, "SLAITBbXDR") == 0);
+    assert(bt_callback == status_led_on_bluetooth_state);
     log_ok = false; run();
     assert(strcmp(order, "SL") == 0 && led == STATUS_LED_ERROR);
     log_ok = true; stream_ok = false; run();
