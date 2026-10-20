@@ -7,7 +7,7 @@ INT1 hardware taps never gate a cue.
 
 The shared function uses the magnitude of the configured axis, including
 `-32768` as magnitude `32768`. The inclusive software threshold is
-`APP_IMPACT_THRESHOLD_RAW = 8200` (4.0016 g using the configured sensitivity).
+`APP_IMPACT_THRESHOLD_RAW = 20500` (10.004 g using the configured sensitivity).
 One candidate is evaluated on a transition from below to at/above threshold;
 the signal must fall below threshold to rearm, including after a skipped cue.
 Changing sign while above threshold does not rearm detection.
@@ -52,7 +52,7 @@ Normal mode disables INT1 routing because it has no tap telemetry consumer.
 
 The hardware tap threshold is derived from the software threshold and rounded
 down to the available FS/32 step, clamped to 1..31. At the current +/-16 g
-range it is code 8, or 4 g; the exact 4.0016 g threshold still belongs to the
+range it is code 20, or 10 g; the exact 10.004 g threshold still belongs to the
 software detector. The hardware tap axis follows the configured impact axis.
 See ST's [LIS2DW12 application note, AN5038](https://www.st.com/resource/en/application_note/an5038-lis2dw12-alwayson-3d-accelerometer-stmicroelectronics.pdf)
 for tap threshold quantization.
@@ -160,7 +160,7 @@ No deliberate impacts were captured in the last serial window. Full
 20-impact/walking acceptance remains pending. Local evidence is
 `.pio/task5-cpu1-stationary.log` and `.pio/task5-cpu1-impacts.log`.
 
-### User-approved sensitivity trial
+### Initial user-approved sensitivity trial (4 g)
 
 Following that clarification, the user approved raising the shared threshold
 from 4500 raw (2.196 g) to 8200 raw (4.0016 g). This explicitly authorizes
@@ -171,13 +171,49 @@ captured unwanted sample (-5668), a strong deliberate impact (-32732), and
 the new inclusive positive/negative threshold boundaries. The unwanted sample
 must not request playback, while the strong impact and exact boundaries do.
 
-This is a physical sensitivity trial: the recorded unwanted sample predates
+This was a physical sensitivity trial: the recorded unwanted sample predates
 CPU1 isolation and does not establish the amplitude of the later handling
-contacts. User confirmation is still needed to judge deliberate-hit response
-and light-contact rejection with the new threshold.
+contacts. The subsequent user check reported three normal and three light tip
+contacts all producing cues, so this setting did not meet sensitivity needs.
 
 With the trial threshold, all 42 Unity tests and the native sensor,
 calibration-task, power, and Bluetooth regressions passed. Both `tinypico`
 and `tinypico_calibration` built successfully; review found no actionable
 issues. The configured-processor regression was first observed failing with
 the old threshold, then passing after the change.
+
+### Waveform-based sensitivity trial (10 g)
+
+A full calibration-stream capture collected 62955 samples. The user labelled
+the seven contacts as one sideways hit, three normal hits, and three light tip
+contacts. Full Y-axis peaks (rather than the first crossing samples logged by
+normal firmware) were:
+
+| Contact type | Peak raw magnitudes | Peak acceleration |
+| --- | --- | --- |
+| Sideways | 9964 | 4.86 g |
+| Normal | 29352, 26264, 32732 | 14.32, 12.82, 15.97 g |
+| Light | 10708, 18424, 9828 | 5.23, 8.99, 4.80 g |
+
+The labelled window had no sample-sequence gaps or invalid protocol frames.
+Startup decoding errors and six sequence gaps were confined to the earlier
+startup period. Firmware sample-drop counters remained zero. Local evidence
+is `.pio/task5-contact-waveforms-retry.csv` and its accompanying raw capture
+and packet log.
+
+Offline replay through the actual shared C detector at 20500 raw (10.004 g)
+accepted exactly the three normal hits and rejected the sideways and three
+light contacts. The user approved applying this threshold to both modes,
+including calibration metadata, with refractory unchanged at 200 ms. The
+configured-processor regression now rejects the captured sideways/light
+peaks and accepts all three normal peaks plus exact positive/negative 20500
+boundaries. The diagnostic tap threshold follows the new setting as code 20.
+
+This small labelled capture supports a further sensitivity trial, not a
+general guarantee across users, surfaces, or walking conditions. Live response
+at the new threshold and full task-5 physical acceptance remain pending.
+
+With 20500 configured, all 42 Unity tests and the native sensor,
+calibration-task, power, and Bluetooth regressions passed. Both firmware modes
+built successfully, and review found no actionable issues. The updated contact
+regression was first observed failing at the old 8200 setting.

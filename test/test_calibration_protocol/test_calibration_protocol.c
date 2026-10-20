@@ -596,18 +596,22 @@ void test_configured_impact_processor_rejects_light_contact_and_accepts_strong_i
     impact_init(&config);
     impact_event_t event;
 
-    /* Captured unwanted cue, followed by a captured deliberate impact. */
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(-5668, 1000000, &event));
+    /* Earlier unwanted cue, then captured sideways/light-contact peaks and boundaries. */
+    const int16_t rejected[] = {-5668, -9964, -10708, -18424, -9828, 20499, -20499};
+    for (unsigned i = 0; i < sizeof(rejected) / sizeof(rejected[0]); ++i) {
+        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD,
+                          process_y(rejected[i], 1000000 + (int64_t)i * 10000, &event));
+    }
     TEST_ASSERT_EQUAL_UINT32(0, s_test_playback_calls);
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(8199, 1100000, &event));
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-32732, 1200000, &event));
-    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
-    (void)process_y(0, 1500000, &event);
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(8200, 1600000, &event));
-    TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
-    (void)process_y(0, 1900000, &event);
-    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-8200, 2000000, &event));
-    TEST_ASSERT_EQUAL_UINT32(3, s_test_playback_calls);
+
+    /* Three labelled normal-contact peaks, then the inclusive signed boundaries. */
+    const int16_t accepted[] = {-29352, -26264, -32732, 20500, -20500};
+    for (unsigned i = 0; i < sizeof(accepted) / sizeof(accepted[0]); ++i) {
+        int64_t timestamp_us = 2000000 + (int64_t)i * 300000;
+        TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(accepted[i], timestamp_us, &event));
+        TEST_ASSERT_EQUAL_UINT32(i + 1, s_test_playback_calls);
+        (void)process_y(0, timestamp_us + 1, &event);
+    }
 }
 
 void test_shared_impact_processor_accepts_exact_threshold_and_signed_saturation(void) {
