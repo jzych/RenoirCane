@@ -115,8 +115,15 @@ static void emit_log_packet(void) {
         if (count > 0) length = (size_t)count;
     }
     /* Drain text even during continuous overflow: notices cannot starve it. */
-    length += calibration_log_read(payload + length, sizeof(payload) - length);
-    if (length != 0U) (void)write_packet(CAL_PKT_LOG, payload, (uint16_t)length);
+    size_t text_length = calibration_log_read(payload + length, sizeof(payload) - length);
+    length += text_length;
+    if (length != 0U && !write_packet(CAL_PKT_LOG, payload, (uint16_t)length)) {
+        /* Restore the unsent notice and count consumed text, not the notice's
+         * ASCII bytes. Add separately to avoid overflow before saturation and
+         * preserve any producer losses accumulated during the UART write. */
+        calibration_log_record_dropped_bytes(dropped);
+        calibration_log_record_dropped_bytes(text_length);
+    }
 }
 
 static void emit_impact_outcome(const accel_sample_t *sample, bool tap_confirmed) {

@@ -112,6 +112,15 @@ int main(void) {
         ++counts[index];
     }
     for (unsigned i = 0; i < 4; ++i) assert(counts[i] == 50);
+    /* Transport losses must add to concurrent capture loss, then saturate. */
+    calibration_log_record_dropped_bytes(8);
+    count_dropped(5);
+    calibration_log_record_dropped_bytes(23);
+    assert(calibration_log_take_dropped_bytes() == 36);
+    calibration_log_record_dropped_bytes(UINT32_MAX - 10);
+    calibration_log_record_dropped_bytes(23);
+    assert(calibration_log_take_dropped_bytes() == UINT32_MAX);
+    assert(calibration_log_take_dropped_bytes() == 0);
     puts("PASS: log/stdio/ROM capture, truncation, overflow, wrap, concurrent producers, init failures");
     return 0;
 }

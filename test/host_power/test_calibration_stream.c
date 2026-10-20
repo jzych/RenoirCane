@@ -26,6 +26,8 @@ static size_t wire_length;
 static jmp_buf transport_finished;
 static bool transport_sample_pending, transport_event_pending;
 static unsigned clock_reads;
+static uint32_t log_dropped, drops_during_write;
+static bool fail_write, short_write;
 
 BaseType_t xTaskCreate(void (*fn)(void *), const char *name, uint32_t stack,
                       void *arg, UBaseType_t priority, TaskHandle_t *out) {
@@ -100,6 +102,10 @@ int uart_read_bytes(int port, void *buffer, uint32_t length, TickType_t wait) {
 }
 int uart_write_bytes(int port, const void *buffer, size_t length) {
     assert(port == 0 && wire_length + length <= sizeof(wire));
+    log_dropped += drops_during_write;
+    drops_during_write = 0;
+    if (fail_write) return -1;
+    if (short_write) return (int)length - 1;
     memcpy(wire + wire_length, buffer, length);
     wire_length += length;
     return (int)length;
@@ -112,7 +118,15 @@ size_t calibration_log_read(uint8_t *buffer, size_t capacity) {
     log_pending = false;
     return sizeof(text) - 1;
 }
-uint32_t calibration_log_take_dropped_bytes(void) { return log_pending ? 8 : 0; }
+uint32_t calibration_log_take_dropped_bytes(void) {
+    uint32_t dropped = log_dropped;
+    log_dropped = 0;
+    return dropped;
+}
+void calibration_log_record_dropped_bytes(size_t count) {
+    if (count > UINT32_MAX - log_dropped) log_dropped = UINT32_MAX;
+    else log_dropped += (uint32_t)count;
+}
 bool accelerometer_read_sample(accel_sample_t *sample) {
     ++reads;
     io_order[io_count++] = 'R';
@@ -238,6 +252,7 @@ int main(void) {
     clock_reads = 0;
     s_impact_telemetry.event_packets_sent = 0;
     transport_running = log_pending = true;
+    log_dropped = 8;
     transport_sample_pending = transport_event_pending = true;
     if (setjmp(transport_finished) == 0) transport_task(NULL);
     assert(!log_pending && wire_length > 1 && wire[0] == 0);
@@ -264,6 +279,36 @@ int main(void) {
     }
     assert(packets == 6 && !transport_sample_pending && !transport_event_pending);
     assert(s_samples_transmitted >= 1 && s_impact_telemetry.event_packets_sent == 1);
+    /* A failed send must preserve the old notice and account for the 23 text
+       bytes consumed from the ring, including losses produced during the write. */
+    wire_length = 0;
+    log_pending = fail_write = true;
+    log_dropped = 8;
+    drops_during_write = 5;
+    emit_log_packet();
+    assert(!log_pending && log_dropped == 36 && wire_length == 0);
+    emit_log_packet(); /* A failed notice-only packet must not inflate the count. */
+    assert(log_dropped == 36);
+    fail_write = false;
+    emit_log_packet();
+    assert(log_dropped == 0 && wire_length > 0);
+    assert(calibration_packet_decode(wire, wire_length - 1, raw, sizeof(raw), &packet));
+    const char loss_notice[] = "\n[firmware logs dropped: 36 bytes]\n";
+    assert(packet.packet_type == CAL_PKT_LOG && packet.payload_length == sizeof(loss_notice) - 1);
+    assert(memcmp(packet.payload, loss_notice, sizeof(loss_notice) - 1) == 0);
+
+    wire_length = 0;
+    log_pending = short_write = true;
+    log_dropped = UINT32_MAX - 10;
+    emit_log_packet(); /* Conservatively count the whole text on a short write. */
+    assert(!log_pending && log_dropped == UINT32_MAX);
+    short_write = false;
+    emit_log_packet();
+    assert(log_dropped == 0);
+    assert(calibration_packet_decode(wire, wire_length - 1, raw, sizeof(raw), &packet));
+    const char saturated_notice[] = "\n[firmware logs dropped: 4294967295 bytes]\n";
+    assert(packet.payload_length == sizeof(saturated_notice) - 1);
+    assert(memcmp(packet.payload, saturated_notice, sizeof(saturated_notice) - 1) == 0);
     puts("PASS: UART drain failure, delimiter/metadata/framed logs, tap-gated cues/markers and queue drops");
     return 0;
 }

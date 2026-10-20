@@ -23,6 +23,10 @@ characters and replaces invalid bytes; session reset clears its pending state.
 - Formatting is bounded to 256 bytes per ESP-IDF log call. Long messages end in
   `[truncated]`. Overflow drops new bytes, and a framed dropped-byte notice
   reports both truncation and buffer loss. No producer waits for transport.
+- Log delivery is best effort. If a UART write fails or is short, its consumed
+  text bytes are counted as lost and its unsent loss count is restored, adding
+  to any new producer losses. A later successful log packet reports the total,
+  saturating at `UINT32_MAX`; repeatedly failed notices do not inflate it.
 - The transport sends at most one log packet per iteration, after samples,
   impact events and due telemetry. Overflow notices share that packet with
   queued text so continuous overflow cannot prevent the buffer from draining.
@@ -43,6 +47,15 @@ pre-existing, separate batch-diagnostics failure behavior is unchanged: if both
 of those diagnostic backends fail, the reader can close the connection before
 dispatching packets. That behavior is outside task 6's permitted app files.
 
+Review follow-up proposal (not implemented): make the shared `diagnose()`
+adapter in `calibration_app/app/diagnostics.py` catch exceptions from its Python
+logging fallback as well as Android logging. Drop the diagnostic if both fail,
+without recursively logging the failure. Add reader regressions that fail both
+backends on decoded-packet and bad-frame diagnostics, then verify valid packets
+still dispatch, the backend is not closed and `reader.error` remains unset.
+Keep actual serial read failures terminal. This expands the original app-file
+scope to the shared adapter and its regression tests.
+
 ## Acceptance check
 
 After receiving valid metadata and baseline impact telemetry, capture at least
@@ -55,7 +68,8 @@ and host sample gaps separately. Restore normal firmware and verify its usual
 
 Automated coverage includes capture/transport startup order, initialization
 failure, VFS mount translation, concurrent producers, truncation, ring overflow
-and wrap, UART drain failure, mixed packet priority/event accounting, UTF-8
+and wrap, UART drain failure, failed/short log writes and loss-count saturation,
+mixed packet priority/event accounting, UTF-8
 fragmentation/reset and controller diagnostic failure. The native regression
 suites, 43 Unity cases, 68 app tests and both firmware builds passed; the Unity
 device image compiled without upload or device execution.
@@ -84,6 +98,11 @@ total; the first spans the gap between captures and three are fully within the
 follow-up. These results verify the ten-minute stream and reconnect behavior in
 **separate capture windows**, rather than claiming a single uninterrupted
 ten-minute capture containing all three cycles.
+
+The user explicitly skipped the remaining combined 600-second/three-reconnect
+acceptance test during review follow-up. It remains unverified. These hardware
+observations apply to `aa45032`; the subsequent UART failure-accounting fix is
+covered by automated fault injection and has not been flashed or live tested.
 
 Raw captures, firmware diagnostic logs, summaries and the reconnect timeline
 are retained locally under this worktree's `.pio/task6-*` paths.

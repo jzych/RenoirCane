@@ -144,3 +144,7 @@ uint32_t calibration_log_take_dropped_bytes(void) {
     portEXIT_CRITICAL_SAFE(&s_lock);
     return dropped;
 }
+
+void calibration_log_record_dropped_bytes(size_t count) {
+    count_dropped(count);
+}
