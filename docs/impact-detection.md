@@ -6,8 +6,8 @@ at the configured 800 Hz. Both call `impact_process_sample()` in
 INT1 hardware taps never gate a cue.
 
 The shared function uses the magnitude of the configured axis, including
-`-32768` as magnitude `32768`. The inclusive software threshold remains
-`APP_IMPACT_THRESHOLD_RAW = 4500` (2.196 g using the configured sensitivity).
+`-32768` as magnitude `32768`. The inclusive software threshold is
+`APP_IMPACT_THRESHOLD_RAW = 8200` (4.0016 g using the configured sensitivity).
 One candidate is evaluated on a transition from below to at/above threshold;
 the signal must fall below threshold to rearm, including after a skipped cue.
 Changing sign while above threshold does not rearm detection.
@@ -52,7 +52,7 @@ Normal mode disables INT1 routing because it has no tap telemetry consumer.
 
 The hardware tap threshold is derived from the software threshold and rounded
 down to the available FS/32 step, clamped to 1..31. At the current +/-16 g
-range it is code 4, or 2 g; the exact 2.196 g threshold still belongs to the
+range it is code 8, or 4 g; the exact 4.0016 g threshold still belongs to the
 software detector. The hardware tap axis follows the configured impact axis.
 See ST's [LIS2DW12 application note, AN5038](https://www.st.com/resource/en/application_note/an5038-lis2dw12-alwayson-3d-accelerometer-stmicroelectronics.pdf)
 for tap threshold quantization.
@@ -76,8 +76,9 @@ passed on the native runner, and the native sensor, calibration-task, standby,
 and Bluetooth regressions passed. Independent review's logging-throughput and
 tap/sample-ordering findings were corrected and re-reviewed with no remaining
 actionable findings. Calibration app tests passed (63), as did audio tests (6).
-No task-5 firmware has been uploaded during this work; the device-image build
-used `--without-uploading --without-testing` and did not run tests on hardware.
+At that initial verification, no task-5 firmware had been uploaded; the
+device-image build used `--without-uploading --without-testing` and did not run
+tests on hardware. Later uploads and observations are recorded below.
 
 Physical acceptance remains pending:
 
@@ -153,7 +154,30 @@ readings. This contrasts with the guard-only capture's 27 malformed frames in
 
 These observations support retaining CPU1 isolation for this board and build;
 they do not prove the internal mechanism behind the ESP-IDF interference.
-The final manual three-impact confirmation remains pending: no deliberate
-impacts were captured in the last window. Full 20-impact/walking acceptance
-also remains pending. Local evidence is `.pio/task5-cpu1-stationary.log` and
-`.pio/task5-cpu1-impacts.log`.
+The user subsequently reported three deliberate cues and three additional
+cues, clarifying that the extras followed separate light contacts or handling.
+No deliberate impacts were captured in the last serial window. Full
+20-impact/walking acceptance remains pending. Local evidence is
+`.pio/task5-cpu1-stationary.log` and `.pio/task5-cpu1-impacts.log`.
+
+### User-approved sensitivity trial
+
+Following that clarification, the user approved raising the shared threshold
+from 4500 raw (2.196 g) to 8200 raw (4.0016 g). This explicitly authorizes
+retuning beyond the original task-5 scope. Normal and calibration modes use
+the same new threshold, including calibration metadata; refractory remains
+200 ms. A regression exercises the configured processor with the previously
+captured unwanted sample (-5668), a strong deliberate impact (-32732), and
+the new inclusive positive/negative threshold boundaries. The unwanted sample
+must not request playback, while the strong impact and exact boundaries do.
+
+This is a physical sensitivity trial: the recorded unwanted sample predates
+CPU1 isolation and does not establish the amplitude of the later handling
+contacts. User confirmation is still needed to judge deliberate-hit response
+and light-contact rejection with the new threshold.
+
+With the trial threshold, all 42 Unity tests and the native sensor,
+calibration-task, power, and Bluetooth regressions passed. Both `tinypico`
+and `tinypico_calibration` built successfully; review found no actionable
+issues. The configured-processor regression was first observed failing with
+the old threshold, then passing after the change.

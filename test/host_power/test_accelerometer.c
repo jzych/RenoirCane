@@ -95,12 +95,12 @@ int main(void) {
     memcpy(&registers[0x28], stale_raw, sizeof(stale_raw));
     assert(accelerometer_set_data_ready_callback(NULL));
     assert(registers[0x24] == 1);
-    /* 4500 raw = 2.196 g; tap diagnostics quantize down to 4 * 0.5 g. */
-    assert(registers[0x31] == 4);
+    /* 8200 raw = 4.0016 g; tap diagnostics quantize down to 8 * 0.5 g. */
+    assert(registers[0x31] == 8);
 
     /* Valid 14-bit left-aligned data: rest, exact threshold, signed limits. */
     expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02}, 196, -1984, 520);
-    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x94, 0x11, 0x08, 0x02}, 196, 4500, 520);
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x08, 0x20, 0x08, 0x02}, 196, 8200, 520);
     expect_valid_sample((const uint8_t[]){0xfc, 0x7f, 0x00, 0x80, 0x00, 0x00}, 32764, -32768, 0);
 
     /* Exact frames from three spontaneous cues while the cane was still.

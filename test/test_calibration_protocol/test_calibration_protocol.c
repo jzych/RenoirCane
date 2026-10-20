@@ -343,13 +343,6 @@ void test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playb
         IMPACT_CANDIDATE_PROCESSED, 1500000, 500000, &audio_busy_until_us));
 }
 
-void test_impact_threshold_is_the_tuned_2_196_g_inside_the_sensor_range(void) {
-    float threshold_g = (float)APP_IMPACT_THRESHOLD_RAW * APP_ACCEL_SENSITIVITY_MG_LSB / 1000.0f;
-
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.196f, threshold_g);
-    TEST_ASSERT_TRUE(threshold_g < (float)APP_ACCEL_RANGE_G);
-}
-
 void test_bluetooth_policy_requests_the_initial_connection_only_once(void) {
     bt_audio_policy_t policy;
 
@@ -595,6 +588,28 @@ static impact_candidate_result_t process_y(int16_t y, int64_t timestamp_us, impa
     return impact_process_sample(&sample, test_start_playback, event);
 }
 
+void test_configured_impact_processor_rejects_light_contact_and_accepts_strong_impact(void) {
+    init_sample_processor();
+    impact_config_t config = {.axis = APP_IMPACT_ACTIVE_AXIS,
+                              .threshold_raw = APP_IMPACT_THRESHOLD_RAW,
+                              .refractory_ms = APP_IMPACT_REFRACTORY_MS};
+    impact_init(&config);
+    impact_event_t event;
+
+    /* Captured unwanted cue, followed by a captured deliberate impact. */
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(-5668, 1000000, &event));
+    TEST_ASSERT_EQUAL_UINT32(0, s_test_playback_calls);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_BELOW_THRESHOLD, process_y(8199, 1100000, &event));
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-32732, 1200000, &event));
+    TEST_ASSERT_EQUAL_UINT32(1, s_test_playback_calls);
+    (void)process_y(0, 1500000, &event);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(8200, 1600000, &event));
+    TEST_ASSERT_EQUAL_UINT32(2, s_test_playback_calls);
+    (void)process_y(0, 1900000, &event);
+    TEST_ASSERT_EQUAL(IMPACT_CANDIDATE_PROCESSED, process_y(-8200, 2000000, &event));
+    TEST_ASSERT_EQUAL_UINT32(3, s_test_playback_calls);
+}
+
 void test_shared_impact_processor_accepts_exact_threshold_and_signed_saturation(void) {
     const int16_t values[] = {4500, -4500, INT16_MAX, INT16_MIN};
     const uint32_t magnitudes[] = {4500U, 4500U, 32767U, 32768U};
@@ -700,7 +715,7 @@ void app_main(void) {
     RUN_TEST(test_audio_stop_cancels_active_pcm_playback);
     RUN_TEST(test_audio_impact_finishes_after_one_second_of_pcm_without_transport_preroll);
     RUN_TEST(test_audio_busy_rejects_a_candidate_after_its_refractory_period_until_playback_ends);
-    RUN_TEST(test_impact_threshold_is_the_tuned_2_196_g_inside_the_sensor_range);
+    RUN_TEST(test_configured_impact_processor_rejects_light_contact_and_accepts_strong_impact);
     RUN_TEST(test_bluetooth_policy_requests_the_initial_connection_only_once);
     RUN_TEST(test_bluetooth_policy_stops_requesting_after_a_connection_callback);
     RUN_TEST(test_bluetooth_policy_keeps_media_started_while_connected);
