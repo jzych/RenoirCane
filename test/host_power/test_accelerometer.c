@@ -31,20 +31,56 @@ esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) {
     return ESP_OK;
 }
 esp_err_t gpio_intr_disable(gpio_num_t pin) { disabled[pin] = true; return ESP_OK; }
-int64_t esp_timer_get_time(void) { return 0; }
+int64_t esp_timer_get_time(void) { return 123456; }
+
+static void expect_valid_sample(const uint8_t raw[6], int16_t x, int16_t y, int16_t z) {
+    memcpy(&registers[0x28], raw, 6);
+    accel_sample_t sample = {0};
+    assert(accelerometer_read_sample(&sample));
+    assert(sample.x == x && sample.y == y && sample.z == z);
+    assert(sample.timestamp_us == 123456);
+}
+
+static void expect_invalid_sample(const uint8_t raw[6]) {
+    memcpy(&registers[0x28], raw, 6);
+    accel_sample_t sample = {.x = 4, .y = -8, .z = 12, .timestamp_us = 77};
+    assert(!accelerometer_read_sample(&sample));
+    assert(sample.x == 4 && sample.y == -8 && sample.z == 12 && sample.timestamp_us == 77);
+}
 
 int main(void) {
     registers[0x0f] = 0x44;
     assert(accelerometer_init(NULL));
     assert(registers[0x20] == 0x84);
+    /* Draining a malformed stale frame must not prevent INT2 from starting. */
+    const uint8_t stale_raw[] = {0x00, 0x4c, 0xf8, 0x1c, 0x02, 0x02};
+    memcpy(&registers[0x28], stale_raw, sizeof(stale_raw));
     assert(accelerometer_set_data_ready_callback(NULL));
     assert(registers[0x24] == 1);
     /* 4500 raw = 2.196 g; tap diagnostics quantize down to 4 * 0.5 g. */
     assert(registers[0x31] == 4);
+
+    /* Valid 14-bit left-aligned data: rest, exact threshold, signed limits. */
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02}, 196, -1984, 520);
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x94, 0x11, 0x08, 0x02}, 196, 4500, 520);
+    expect_valid_sample((const uint8_t[]){0xfc, 0x7f, 0x00, 0x80, 0x00, 0x00}, 32764, -32768, 0);
+
+    /* Exact frames from three spontaneous cues while the cane was still.
+       Z=514 violates OUT_Z_L's fixed-zero low bits in every frame. */
+    expect_invalid_sample((const uint8_t[]){0x00, 0x4c, 0xf8, 0x1c, 0x02, 0x02});
+    expect_invalid_sample((const uint8_t[]){0xc0, 0x00, 0x4c, 0x1c, 0x02, 0x02});
+    expect_invalid_sample((const uint8_t[]){0xc4, 0x00, 0xf8, 0x14, 0x02, 0x02});
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        for (unsigned bits = 1; bits <= 3; ++bits) {
+            uint8_t raw[] = {0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02};
+            raw[axis * 2] |= bits;
+            expect_invalid_sample(raw);
+        }
+    }
     accelerometer_prepare_for_sleep();
     assert(registers[0x20] == 0x00);
     assert(registers[0x23] == 0x00 && registers[0x24] == 0x00);
     assert(disabled[14] && disabled[4]);
-    puts("PASS: LIS2DW12 ODR power-down and disabled interrupt routing");
+    puts("PASS: sensor startup, valid threshold/saturation, malformed-frame rejection, power-down");
     return 0;
 }

@@ -90,3 +90,35 @@ Physical acceptance remains pending:
   normal mode; verify skipped markers while audio is busy.
 
 Host tests and firmware builds cannot establish these physical results.
+
+## Malformed sensor frames (2026-10-20 correction)
+
+A stationary-device capture reproduced three spontaneous accepted cues. The
+triggering samples were `(19456, 7416, 514)`, `(192, 7244, 514)`, and
+`(196, 5368, 514)`, while surrounding readings stayed near `(196, -1984, 528)`.
+Each triggering frame had Z=514: its low byte violated the fixed-zero bits
+1:0 in the LIS2DW12 output registers. See the output register tables in the
+[ST datasheet, DS11811](https://www.st.com/resource/en/datasheet/lis2dw12.pdf).
+
+`accelerometer_read_sample()` now rejects an entire frame if any axis violates
+these fixed bits, leaving the caller's sample untouched. It does not mask the
+corruption into a plausible value or change threshold/crossing/refractory rules.
+Normal firmware reports discarded-frame totals and raw bytes at most once per
+second. Calibration performs identical rejection without adding text to its
+binary UART stream. The startup drain still requires a successful I2C transfer
+but deliberately ignores payload validity, since that frame is discarded and
+must not prevent later INT2 sampling.
+
+Native driver regressions reproduce the three captured payloads and every
+nonzero low-bit combination on all axes. They also check unchanged output on
+rejection, valid rest/exact-threshold/saturation samples, and malformed-stale
+startup followed by valid acquisition. Actual positive sensor saturation is
+32764 in this left-aligned format; the shared classifier still accepts its
+synthetic +32767 and -32768 test inputs as specified. Both firmware builds,
+the native regressions, and all 42 Unity tests pass after this correction.
+
+This validates a known-invalid input condition, not every possible corruption.
+The underlying cause of the malformed bus payload remains unproven; BDU and
+auto-increment were already enabled. Corruption that preserves the fixed bits
+cannot be detected by this check alone. A stationary live check and deliberate
+impact/cue confirmation are still required after uploading the correction.

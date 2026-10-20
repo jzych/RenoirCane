@@ -27,6 +27,10 @@ static const char *TAG = "ACCEL";
 static accelerometer_irq_callback_t s_callback;
 static accelerometer_irq_callback_t s_data_ready_callback;
 static bool s_isr_service_installed;
+#if !defined(CALIBRATION_MODE) || !CALIBRATION_MODE
+static uint32_t s_invalid_sample_count;
+static int64_t s_last_invalid_sample_log_us;
+#endif
 
 static bool read_register(uint8_t reg, uint8_t *data, size_t length) {
     return i2c_master_write_read_device(APP_I2C_PORT, APP_ACCEL_I2C_ADDR, &reg, 1, data, length, pdMS_TO_TICKS(50)) == ESP_OK;
@@ -84,8 +88,10 @@ bool accelerometer_set_data_ready_callback(accelerometer_irq_callback_t callback
     if (gpio_config(&gpio) != ESP_OK || !install_isr_service() || gpio_isr_handler_add(APP_ACCEL_INT2_GPIO, data_ready_isr, NULL) != ESP_OK) return false;
     /* Clear a stale data-ready level before routing it. The ISR must already
        be installed when routing is enabled, including at first startup. */
-    accel_sample_t initial_sample;
-    return accelerometer_read_sample(&initial_sample) && write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01);
+    uint8_t initial_raw[6];
+    /* This frame is discarded, not classified. Payload corruption must not
+       prevent future data-ready interrupts after a successful bus transfer. */
+    return read_register(LIS2DW12_OUT_X_L, initial_raw, sizeof(initial_raw)) && write_register(LIS2DW12_CTRL5_INT2_PAD_CTRL, 0x01);
 }
 
 void accelerometer_prepare_for_sleep(void) {
@@ -103,7 +109,24 @@ void accelerometer_prepare_for_sleep(void) {
 bool accelerometer_read_sample(accel_sample_t *sample) {
     uint8_t raw[6];
     if (sample == NULL || !read_register(LIS2DW12_OUT_X_L, raw, sizeof(raw))) return false;
-    sample->x = (int16_t)((raw[1] << 8) | raw[0]); sample->y = (int16_t)((raw[3] << 8) | raw[2]); sample->z = (int16_t)((raw[5] << 8) | raw[4]); sample->timestamp_us = esp_timer_get_time(); return true;
+    int64_t now_us = esp_timer_get_time();
+    /* OUT_X/Y/Z_L bits 1:0 are fixed zero (DS11811, output registers).
+       A successful I2C transaction alone does not guarantee valid payload.
+       Reject the entire frame, rather than masking corrupt bits into a cue. */
+    if (((raw[0] | raw[2] | raw[4]) & 0x03U) != 0U) {
+#if !defined(CALIBRATION_MODE) || !CALIBRATION_MODE
+        /* Calibration UART is a binary stream; keep text diagnostics in normal
+           mode so invalid data does not also corrupt calibration packets. */
+        ++s_invalid_sample_count;
+        if (s_invalid_sample_count == 1U || now_us - s_last_invalid_sample_log_us >= 1000000) {
+            ESP_LOGW(TAG, "discarded malformed sample total=%lu raw=%02x %02x %02x %02x %02x %02x",
+                     (unsigned long)s_invalid_sample_count, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
+            s_last_invalid_sample_log_us = now_us;
+        }
+#endif
+        return false;
+    }
+    sample->x = (int16_t)((raw[1] << 8) | raw[0]); sample->y = (int16_t)((raw[3] << 8) | raw[2]); sample->z = (int16_t)((raw[5] << 8) | raw[4]); sample->timestamp_us = now_us; return true;
 }
 
 bool accelerometer_read_impact_status(void) { uint8_t source; return read_register(LIS2DW12_ALL_INT_SRC, &source, 1) && (source & 0x04) != 0; }
