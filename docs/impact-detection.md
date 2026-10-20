@@ -122,3 +122,24 @@ The underlying cause of the malformed bus payload remains unproven; BDU and
 auto-increment were already enabled. Corruption that preserves the fixed bits
 cannot be detected by this check alone. A stationary live check and deliberate
 impact/cue confirmation are still required after uploading the correction.
+
+### I2C interrupt isolation
+
+The guard-only firmware discarded 27 malformed frames over 63.65 seconds with
+the speaker connected and the cane still. A subsequent user check reported
+three deliberate cues and one spontaneous cue; the latter sample
+`(-140, -5668, -348)` passed the fixed-bit guard. Payload validation alone is
+therefore insufficient to establish reliable operation.
+
+The next correction installs the I2C driver from a short-lived task pinned
+to CPU1, assigning its interrupt to that CPU. Both Bluetooth controller and
+Bluedroid are configured on CPU0. The caller waits for installation completion
+before using the sensor; semaphore/task-allocation and driver-install failures
+are propagated with cleanup. Detection thresholds, timing, and sensor data rate
+are unchanged in both modes. This follows a
+[reported ESP-IDF workaround](https://github.com/espressif/esp-idf/issues/7781)
+and requires a connected-speaker comparison to determine effectiveness here.
+
+Native tests check the actual installing core and failure cleanup. Both
+firmware builds and all 42 Unity tests pass with this change; physical
+corruption and false-cue checks are pending upload and live capture.

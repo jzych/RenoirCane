@@ -33,6 +33,8 @@ typedef unsigned portMUX_TYPE;
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
 #define portYIELD_FROM_ISR() ((void)0)
 BaseType_t xTaskCreate(void (*fn)(void *), const char *, uint32_t, void *, UBaseType_t, TaskHandle_t *);
+BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *, uint32_t, void *, UBaseType_t, TaskHandle_t *, BaseType_t);
+BaseType_t xPortGetCoreID(void);
 void xTaskNotifyGive(TaskHandle_t);
 void vTaskNotifyGiveFromISR(TaskHandle_t, BaseType_t *);
 uint32_t ulTaskNotifyTake(BaseType_t, TickType_t);

@@ -8,8 +8,46 @@ static bool disabled[40];
 static uint8_t registers[256];
 static bool data_ready_handler_added;
 static unsigned sample_reads;
+static int current_core;
+static bool fail_semaphore, fail_init_task, fail_driver;
+static struct { bool given; } init_done;
+static unsigned semaphores_created, semaphores_deleted;
+
+SemaphoreHandle_t xSemaphoreCreateBinary(void) {
+    if (fail_semaphore) return NULL;
+    ++semaphores_created;
+    init_done.given = false;
+    return &init_done;
+}
+BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t wait) {
+    assert(semaphore == &init_done && wait == portMAX_DELAY && init_done.given);
+    init_done.given = false;
+    return pdTRUE;
+}
+BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore) {
+    assert(semaphore == &init_done);
+    init_done.given = true;
+    return pdTRUE;
+}
+void vSemaphoreDelete(SemaphoreHandle_t semaphore) { assert(semaphore == &init_done); ++semaphores_deleted; }
+BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t stack,
+                                 void *arg, UBaseType_t priority, TaskHandle_t *out, BaseType_t core) {
+    (void)name; (void)stack; (void)priority; (void)out;
+    if (fail_init_task) return pdFALSE;
+    int caller_core = current_core;
+    current_core = core;
+    fn(arg);
+    current_core = caller_core;
+    return pdPASS;
+}
+BaseType_t xPortGetCoreID(void) { return current_core; }
+void vTaskDelete(TaskHandle_t task) { assert(task == NULL); }
 esp_err_t i2c_param_config(int port, const i2c_config_t *cfg) { (void)port; (void)cfg; return ESP_OK; }
-esp_err_t i2c_driver_install(int p, int m, size_t a, size_t b, int f) { (void)p; (void)m; (void)a; (void)b; (void)f; return ESP_OK; }
+esp_err_t i2c_driver_install(int p, int m, size_t a, size_t b, int f) {
+    (void)p; (void)m; (void)a; (void)b; (void)f;
+    assert(current_core == 1); /* The driver's ISR inherits the installing core. */
+    return fail_driver ? ESP_FAIL : ESP_OK;
+}
 esp_err_t i2c_master_write_read_device(int p, int addr, const uint8_t *reg, size_t n, uint8_t *out, size_t len, TickType_t t) {
     (void)p; (void)addr; (void)n; (void)t;
     if (*reg == 0x28) ++sample_reads;
@@ -81,6 +119,15 @@ int main(void) {
     assert(registers[0x20] == 0x00);
     assert(registers[0x23] == 0x00 && registers[0x24] == 0x00);
     assert(disabled[14] && disabled[4]);
+    fail_semaphore = true;
+    assert(!accelerometer_init(NULL));
+    fail_semaphore = false;
+    fail_init_task = true;
+    assert(!accelerometer_init(NULL));
+    fail_init_task = false;
+    fail_driver = true;
+    assert(!accelerometer_init(NULL));
+    assert(semaphores_created == semaphores_deleted);
     puts("PASS: sensor startup, valid threshold/saturation, malformed-frame rejection, power-down");
     return 0;
 }

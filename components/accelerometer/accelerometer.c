@@ -5,6 +5,9 @@
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #define LIS2DW12_WHO_AM_I 0x0F
 #define LIS2DW12_WHO_AM_I_VALUE 0x44
@@ -52,6 +55,34 @@ static bool install_isr_service(void) {
     return true;
 }
 
+typedef struct {
+    SemaphoreHandle_t done;
+    bool success;
+} i2c_install_context_t;
+
+static void i2c_install_task(void *arg) {
+    i2c_install_context_t *context = arg;
+    context->success = i2c_driver_install(APP_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0) == ESP_OK;
+    if (context->success) ESP_LOGI(TAG, "I2C ISR installed on CPU%d", xPortGetCoreID());
+    xSemaphoreGive(context->done);
+    vTaskDelete(NULL);
+}
+
+static bool install_i2c_driver(void) {
+    /* External interrupts inherit the allocating core. Install on CPU1 to
+       isolate I2C FIFO handling from the Bluetooth controller on CPU0. */
+    i2c_install_context_t context = {.done = xSemaphoreCreateBinary(), .success = false};
+    if (context.done == NULL) return false;
+    if (xTaskCreatePinnedToCore(i2c_install_task, "i2c_init", 3072U, &context, 5U, NULL, 1) != pdPASS) {
+        vSemaphoreDelete(context.done);
+        return false;
+    }
+    /* The worker must finish before this stack context and semaphore expire. */
+    bool success = xSemaphoreTake(context.done, portMAX_DELAY) == pdTRUE && context.success;
+    vSemaphoreDelete(context.done);
+    return success;
+}
+
 static bool configure_tap_diagnostics(void) {
     /* AN5038: TAP_THS steps are FS/32. Round down so this coarse diagnostic
        threshold does not sit above the exact software threshold. */
@@ -68,7 +99,7 @@ static bool configure_tap_diagnostics(void) {
 
 bool accelerometer_init(accelerometer_irq_callback_t irq_callback) {
     i2c_config_t i2c = {.mode = I2C_MODE_MASTER, .sda_io_num = APP_I2C_SDA_GPIO, .scl_io_num = APP_I2C_SCL_GPIO, .sda_pullup_en = GPIO_PULLUP_ENABLE, .scl_pullup_en = GPIO_PULLUP_ENABLE, .master.clk_speed = APP_I2C_FREQ_HZ};
-    if (i2c_param_config(APP_I2C_PORT, &i2c) != ESP_OK || i2c_driver_install(APP_I2C_PORT, i2c.mode, 0, 0, 0) != ESP_OK) return false;
+    if (i2c_param_config(APP_I2C_PORT, &i2c) != ESP_OK || !install_i2c_driver()) return false;
     uint8_t identity = 0;
     if (!read_register(LIS2DW12_WHO_AM_I, &identity, 1) || identity != LIS2DW12_WHO_AM_I_VALUE) { ESP_LOGE(TAG, "WHO_AM_I=0x%02x", identity); return false; }
     if (!write_register(LIS2DW12_CTRL1, 0x84) || !write_register(LIS2DW12_CTRL2, 0x0C) || !write_register(LIS2DW12_CTRL3, 0x10) || !write_register(LIS2DW12_CTRL6, 0x30) ||
