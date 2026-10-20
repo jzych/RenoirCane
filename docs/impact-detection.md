@@ -295,4 +295,27 @@ The normal discard-log counter and rate-limit timestamp are synchronized for
 the two reader tasks; logging happens after releasing the short critical
 section. All 43 native Unity tests and native regressions passed, both firmware
 modes built, and the scheduling/race corrections were reviewed with no
-remaining actionable findings. Physical results for this variant are pending.
+remaining actionable findings.
+
+The first scheduling-variant follow-up reported four light contacts: the first
+and fourth were silent, while the second and third cued. The short recording
+had ended before that report, so it cannot be aligned reliably with those
+contacts. A subsequent capture stayed open through each user response and used
+temporary queued tracing of interrupt receipt, tap confirmation, sample
+validation, classification, and playback, without changing detector settings.
+
+In that capture, five clearly labelled normal hits all cued once, and five
+clearly labelled light contacts all stayed silent. Observed light tap samples
+were below the 4500 software threshold; some light contacts generated no tap
+interrupt. No malformed samples appeared. A separate event between replies
+started playback with Y=8804, followed by refractory rejection, but cannot be
+assigned confidently to a labelled contact. Evidence is
+`.pio/task5-tap-stage-live.log` in the development worktree.
+
+Temporary tracing was then removed and clean normal firmware `421e30d` was
+built and uploaded with verified flash hashes. Post-upload status confirmed
+the speaker streaming and steady sensor samples, with no accepted impacts or
+malformed frames during observation. These small successful labelled checks
+do not explain the earlier intermittent unwanted light cues. Full physical
+acceptance remains pending. Protocol 2 app source is included; an updated
+Android APK has not been built or distributed for this change.
