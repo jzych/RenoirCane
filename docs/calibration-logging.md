@@ -61,3 +61,36 @@ suites, 43 Unity cases, 68 app tests and both firmware builds passed; the Unity
 device image compiled without upload or device execution.
 
 Task 5's physical impact-detection acceptance is separate.
+
+## Hardware observations (2026-10-20)
+
+TinyPICO on COM4, implementation `aa45032`, verified upload hashes:
+
+| Measurement | Baseline | Reconnect follow-up |
+| --- | ---: | ---: |
+| Measured duration | 600.158 s | 180.121 s |
+| Completed reconnect cycles wholly inside the window | 0 | 3 |
+| New bad frames / bad payloads | 0 / 0 | 0 / 0 |
+| Sample drops / event queue drops / host sequence gaps | 0 / 0 / 0 | 0 / 0 / 0 |
+| Impact packets matching firmware telemetry deltas | 11 / 11 | 0 / 0 |
+| Matching consecutive telemetry comparisons | 600 | 180 |
+
+Boot/baud-transition noise accounted for 2812 bad frames before the baseline
+synchronized; these are excluded only from the agreed post-startup window.
+The follow-up started with no startup errors. Firmware uptime advanced from
+601078 ms at the baseline's end to 738078 ms at the follow-up's first status,
+then 918078 ms at its end. Four successful reconnect chains were observed in
+total; the first spans the gap between captures and three are fully within the
+follow-up. These results verify the ten-minute stream and reconnect behavior in
+**separate capture windows**, rather than claiming a single uninterrupted
+ten-minute capture containing all three cycles.
+
+Raw captures, firmware diagnostic logs, summaries and the reconnect timeline
+are retained locally under this worktree's `.pio/task6-*` paths.
+
+Normal firmware was restored on COM4 with verified flash hashes. An eight-second
+115200 startup capture confirmed `v1.0-32-gaa45032`, ELF SHA prefix `bdea4ea90`,
+threshold 4500, I2C ISR on CPU1 and continuing sensor logs without a reset loop.
+Normal standby code and logging call sites are unchanged; the calibration
+capture helper is absent from the normal firmware's linked symbols. Serial
+capture was closed afterward. No merge or push was performed.
