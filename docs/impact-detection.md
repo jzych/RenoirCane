@@ -211,9 +211,42 @@ boundaries. The diagnostic tap threshold follows the new setting as code 20.
 
 This small labelled capture supports a further sensitivity trial, not a
 general guarantee across users, surfaces, or walking conditions. Live response
-at the new threshold and full task-5 physical acceptance remain pending.
+is recorded below; full task-5 physical acceptance remains pending.
 
 With 20500 configured, all 42 Unity tests and the native sensor,
 calibration-task, power, and Bluetooth regressions passed. Both firmware modes
 built successfully, and review found no actionable issues. The updated contact
 regression was first observed failing at the old 8200 setting.
+
+#### Live outcome and remaining sensitivity issue
+
+Normal firmware `063ad99` was uploaded with verified flash hashes. Startup
+confirmed threshold 20500, I2C interrupt on CPU1, and speaker connection.
+The user reported all three normal hits cued, with the middle of three light
+contacts also cuing. The 60-second log had exactly four accepted events and no
+malformed frames; the unwanted contact's first crossing magnitude was 24072
+(at least 11.75 g, not its full measured peak). This trial improved rejection
+but did not resolve light-contact sensitivity.
+
+A second full calibration capture confirmed metadata at 800 Hz, +/-16 g,
+Y axis, threshold 20500. Its three normal peaks were 32736, 30808, and 32736;
+the three light peaks were 25928, 25684, and 21860 (12.65, 12.53, and 10.67 g).
+All six contacts had playback-started firmware markers; the user confirmed a
+light contact also sounded. The labelled window had no sequence gaps or invalid
+protocol frames. These light peaks approach the first capture's weakest normal
+peak of 26264 (12.82 g), leaving little margin for threshold-only tuning.
+Normal `063ad99` firmware was restored afterward and its startup and speaker
+connection verified. Evidence is `.pio/task5-10g-trial.log`,
+`.pio/task5-10g-contact-waveforms.csv`, and
+`.pio/task5-10g-normal-restored-startup.log`.
+
+An offline hypothesis uses the first 20500 crossing to start a 100 ms window,
+freezes the mean of the preceding 64 Y samples, and accumulates squared
+deviation from that baseline over actual sample intervals. With zero-order
+hold and a level of 2e12 raw-squared microseconds, all six normal contacts in
+the two captures reached confirmation in 37-84 ms. All six light contacts and
+the sideways hit were rejected by the amplitude gate or strength requirement.
+This is a small-sample diagnostic calculation, not an implemented filter.
+Adding confirmation would introduce up to 100 ms of decision latency and
+requires a new design decision; no change beyond the approved 10 g threshold
+has been made to production firmware.
