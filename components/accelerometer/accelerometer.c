@@ -33,6 +33,7 @@ static bool s_isr_service_installed;
 #if !defined(CALIBRATION_MODE) || !CALIBRATION_MODE
 static uint32_t s_invalid_sample_count;
 static int64_t s_last_invalid_sample_log_us;
+static portMUX_TYPE s_invalid_sample_log_lock = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
 static bool read_register(uint8_t reg, uint8_t *data, size_t length) {
@@ -146,11 +147,17 @@ bool accelerometer_read_sample(accel_sample_t *sample) {
 #if !defined(CALIBRATION_MODE) || !CALIBRATION_MODE
         /* Calibration UART is a binary stream; keep text diagnostics in normal
            mode so invalid data does not also corrupt calibration packets. */
-        ++s_invalid_sample_count;
+        bool log_invalid_sample = false;
+        portENTER_CRITICAL(&s_invalid_sample_log_lock);
+        uint32_t invalid_sample_count = ++s_invalid_sample_count;
         if (s_invalid_sample_count == 1U || now_us - s_last_invalid_sample_log_us >= 1000000) {
-            ESP_LOGW(TAG, "discarded malformed sample total=%lu raw=%02x %02x %02x %02x %02x %02x",
-                     (unsigned long)s_invalid_sample_count, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
             s_last_invalid_sample_log_us = now_us;
+            log_invalid_sample = true;
+        }
+        portEXIT_CRITICAL(&s_invalid_sample_log_lock);
+        if (log_invalid_sample) {
+            ESP_LOGW(TAG, "discarded malformed sample total=%lu raw=%02x %02x %02x %02x %02x %02x",
+                     (unsigned long)invalid_sample_count, raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]);
         }
 #endif
         return false;

@@ -47,23 +47,36 @@ static void IRAM_ATTR impact_irq_notify(void) {
 
 static void impact_task(void *arg) {
     (void)arg;
-    int64_t last_diagnostic_us = 0;
     for (;;) {
-        uint32_t taps = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (power_is_entering_standby()) continue;
         accel_sample_t sample;
         impact_event_t event;
         bool tap_confirmed;
-        if (!impact_read_sample(taps != 0U, &sample, &tap_confirmed)) continue;
+        if (!impact_read_sample(true, &sample, &tap_confirmed)) continue;
         impact_candidate_result_t result = impact_process_sample(&sample, tap_confirmed, bluetooth_audio_start_impact, &event);
         if (result == IMPACT_CANDIDATE_PROCESSED) {
             ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z);
         }
-        /* The same task owns tap reads and once-per-second diagnostics. */
-        if (sample.timestamp_us - last_diagnostic_us >= 1000000) {
-            ESP_LOGI("ACCEL", "x=%d y=%d z=%d", sample.x, sample.y, sample.z);
-            last_diagnostic_us = sample.timestamp_us;
+    }
+}
+
+/* Keep diagnostics on their original lower-priority task, separate from the
+   tap-notification loop. An in-flight I2C transaction can still hold the bus. */
+static void accel_diagnostic_task(void *arg) {
+    (void)arg;
+    for (;;) {
+        if (power_is_entering_standby()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
+        accel_sample_t sample;
+        if (accelerometer_read_sample(&sample)) {
+            ESP_LOGI("ACCEL", "x=%d y=%d z=%d", sample.x, sample.y, sample.z);
+        } else {
+            ESP_LOGW("ACCEL", "sample read failed");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 #endif
@@ -96,6 +109,8 @@ void app_main(void) {
         !accelerometer_init(impact_irq_notify)) {
         status_led_set(STATUS_LED_ERROR);
         ESP_LOGE(TAG, "accelerometer initialization failed");
+    } else {
+        xTaskCreate(accel_diagnostic_task, "accel_diag", 3072, NULL, 5, NULL);
     }
     debug_console_init();
     power_init();

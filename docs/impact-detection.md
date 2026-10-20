@@ -29,9 +29,9 @@ no event. The graph's metadata threshold is the same post-tap software value
 used in normal operation; a graph peak alone is insufficient to trigger a cue.
 Disconnect/error results are skipped, not audio-busy.
 
-One task owns sensor output reads in each mode. Normal mode wakes on INT1,
-with a one-second timeout for diagnostics, and retains its original task
-priority 6. Calibration keeps the INT2 graph stream at the configured 800 Hz;
+Normal mode retains its original scheduling: the priority-6 tap task waits
+on INT1, and a separate priority-5 task reads diagnostics once per second.
+Calibration has one sensor-output reader and keeps the INT2 graph stream at 800 Hz;
 INT1 also wakes its sampling task immediately for post-tap acquisition. A tap
 arriving during a read belongs to the next read. A failed post-tap acquisition
 consumes the cleared tap, matching original normal behavior; it cannot arm an
@@ -282,3 +282,17 @@ built successfully. The device image was built without uploading or running
 device tests. Review's protocol-version finding was corrected and re-reviewed
 with no remaining actionable issues. Live verification of the restored path
 and the full normal/calibration physical comparison remain pending.
+
+A controlled check of unchanged `f1c8064` produced two cues from three normal
+hits (first silent) and zero cues from three light contacts. The initial
+restoration produced one cue from three normal hits (middle only) and one cue
+from three light contacts. These small samples do not isolate a cause, but
+they do not establish physical equivalence. The original separate diagnostic
+task was then restored as a controlled scheduling variant; this removes a
+remaining deliberate deviation from the normal-mode baseline. Sensor core
+isolation, frame validation, shared tap gating, and thresholds are unchanged.
+The normal discard-log counter and rate-limit timestamp are synchronized for
+the two reader tasks; logging happens after releasing the short critical
+section. All 43 native Unity tests and native regressions passed, both firmware
+modes built, and the scheduling/race corrections were reviewed with no
+remaining actionable findings. Physical results for this variant are pending.
