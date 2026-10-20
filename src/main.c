@@ -50,18 +50,19 @@ static void impact_task(void *arg) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (power_is_entering_standby()) continue;
-        bool tap_candidate = accelerometer_read_impact_status();
-        accelerometer_clear_interrupt();
         accel_sample_t sample;
         impact_event_t event;
-        if (tap_candidate && accelerometer_read_sample(&sample) && impact_validate_candidate(&sample, sample.timestamp_us, &event)) {
-            impact_mark_accepted(event.timestamp_us);
-            bt_audio_play_result_t playback_result = bluetooth_audio_start_impact();
-            ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d playback=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z, playback_result);
+        bool tap_confirmed;
+        if (!impact_read_sample(true, &sample, &tap_confirmed)) continue;
+        impact_candidate_result_t result = impact_process_sample(&sample, tap_confirmed, bluetooth_audio_start_impact, &event);
+        if (result == IMPACT_CANDIDATE_PROCESSED) {
+            ESP_LOGI("IMPACT", "accepted t_us=%lld axis_raw=%lu x=%d y=%d z=%d", event.timestamp_us, (unsigned long)event.axis_abs_raw, event.sample.x, event.sample.y, event.sample.z);
         }
     }
 }
 
+/* Keep diagnostics on their original lower-priority task, separate from the
+   tap-notification loop. An in-flight I2C transaction can still hold the bus. */
 static void accel_diagnostic_task(void *arg) {
     (void)arg;
     for (;;) {
@@ -104,8 +105,8 @@ void app_main(void) {
         status_led_set(STATUS_LED_ERROR);
     }
     impact_init(&config);
-    xTaskCreate(impact_task, "impact", 3072, NULL, 6, &s_impact_task);
-    if (!accelerometer_init(impact_irq_notify)) {
+    if (xTaskCreate(impact_task, "impact", 3072, NULL, 6, &s_impact_task) != pdPASS ||
+        !accelerometer_init(impact_irq_notify)) {
         status_led_set(STATUS_LED_ERROR);
         ESP_LOGE(TAG, "accelerometer initialization failed");
     } else {

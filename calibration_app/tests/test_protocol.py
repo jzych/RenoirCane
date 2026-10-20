@@ -1,11 +1,11 @@
 import struct
 import zlib
 
-from app.protocol import CAL_PKT_METADATA, FrameParser, Packet, encode_frame
+from app.protocol import CAL_PKT_METADATA, PROTOCOL_VERSION, FrameParser, Packet, encode_frame
 
 
 def test_frame_round_trip_preserves_zero_payload_bytes():
-    packet = Packet(version=1, packet_type=CAL_PKT_METADATA, payload=b"\x00\x11\x00")
+    packet = Packet(version=PROTOCOL_VERSION, packet_type=CAL_PKT_METADATA, payload=b"\x00\x11\x00")
     parser = FrameParser()
 
     assert parser.feed(encode_frame(packet.packet_type, packet.payload)) == [packet]
@@ -19,7 +19,7 @@ def test_parser_accepts_packet_split_across_reads():
     for byte in frame:
         packets.extend(parser.feed(bytes([byte])))
 
-    assert packets == [Packet(version=1, packet_type=CAL_PKT_METADATA, payload=b"metadata")]
+    assert packets == [Packet(version=PROTOCOL_VERSION, packet_type=CAL_PKT_METADATA, payload=b"metadata")]
 
 
 def test_parser_recovers_after_corrupt_frame():
@@ -28,12 +28,12 @@ def test_parser_recovers_after_corrupt_frame():
     corrupt[1] ^= 0x40
     parser = FrameParser()
 
-    assert parser.feed(bytes(corrupt) + valid) == [Packet(version=1, packet_type=CAL_PKT_METADATA, payload=b"ok")]
+    assert parser.feed(bytes(corrupt) + valid) == [Packet(version=PROTOCOL_VERSION, packet_type=CAL_PKT_METADATA, payload=b"ok")]
     assert parser.bad_packet_count == 1
 
 
 def test_packet_payload_length_is_validated():
-    header = struct.pack("<BBH", 1, CAL_PKT_METADATA, 4)
+    header = struct.pack("<BBH", PROTOCOL_VERSION, CAL_PKT_METADATA, 4)
     raw = header + b"bad" + struct.pack("<I", zlib.crc32(header + b"bad") & 0xFFFFFFFF)
     from app.cobs import encode
 
@@ -48,8 +48,16 @@ def raw_frame(raw: bytes) -> bytes:
     return encode(raw) + b"\x00"
 
 
+def test_parser_rejects_legacy_stream_detection_counter_semantics():
+    header = struct.pack("<BBH", 1, CAL_PKT_METADATA, 0)
+    parser = FrameParser()
+
+    assert parser.feed(raw_frame(header + struct.pack("<I", zlib.crc32(header) & 0xFFFFFFFF))) == []
+    assert parser.bad_packet_count == 1
+
+
 def test_parser_rejects_a_frame_whose_crc_does_not_match():
-    header = struct.pack("<BBH", 1, CAL_PKT_METADATA, 2)
+    header = struct.pack("<BBH", PROTOCOL_VERSION, CAL_PKT_METADATA, 2)
     good_crc = zlib.crc32(header + b"ok") & 0xFFFFFFFF
     parser = FrameParser()
 
@@ -66,7 +74,7 @@ def test_parser_rejects_frames_shorter_than_header_and_crc():
 
 
 def test_parser_rejects_an_unknown_protocol_version():
-    header = struct.pack("<BBH", 2, CAL_PKT_METADATA, 0)
+    header = struct.pack("<BBH", PROTOCOL_VERSION + 1, CAL_PKT_METADATA, 0)
     parser = FrameParser()
 
     assert parser.feed(raw_frame(header + struct.pack("<I", zlib.crc32(header) & 0xFFFFFFFF))) == []
@@ -78,7 +86,7 @@ def test_parser_counts_invalid_cobs_and_keeps_parsing():
     valid = encode_frame(CAL_PKT_METADATA, b"ok")
 
     # Code byte 0x05 claims four data bytes but only one follows.
-    assert parser.feed(b"\x05\x01\x00" + valid) == [Packet(1, CAL_PKT_METADATA, b"ok")]
+    assert parser.feed(b"\x05\x01\x00" + valid) == [Packet(PROTOCOL_VERSION, CAL_PKT_METADATA, b"ok")]
     assert parser.bad_packet_count == 1
 
 
@@ -91,5 +99,5 @@ def test_frame_round_trip_handles_runs_longer_than_one_cobs_block():
     assert b"\x00" not in encoded
     assert decode(encoded) == payload
     assert FrameParser().feed(encode_frame(CAL_PKT_METADATA, payload)) == [
-        Packet(1, CAL_PKT_METADATA, payload)
+        Packet(PROTOCOL_VERSION, CAL_PKT_METADATA, payload)
     ]

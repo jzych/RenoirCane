@@ -6,30 +6,135 @@
 
 static bool disabled[40];
 static uint8_t registers[256];
+static bool data_ready_handler_added;
+static bool tap_handler_added;
+static unsigned sample_reads;
+static int current_core;
+static bool fail_semaphore, fail_init_task, fail_driver;
+static struct { bool given; } init_done;
+static unsigned semaphores_created, semaphores_deleted;
+
+SemaphoreHandle_t xSemaphoreCreateBinary(void) {
+    if (fail_semaphore) return NULL;
+    ++semaphores_created;
+    init_done.given = false;
+    return &init_done;
+}
+BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t wait) {
+    assert(semaphore == &init_done && wait == portMAX_DELAY && init_done.given);
+    init_done.given = false;
+    return pdTRUE;
+}
+BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore) {
+    assert(semaphore == &init_done);
+    init_done.given = true;
+    return pdTRUE;
+}
+void vSemaphoreDelete(SemaphoreHandle_t semaphore) { assert(semaphore == &init_done); ++semaphores_deleted; }
+BaseType_t xTaskCreatePinnedToCore(void (*fn)(void *), const char *name, uint32_t stack,
+                                 void *arg, UBaseType_t priority, TaskHandle_t *out, BaseType_t core) {
+    (void)name; (void)stack; (void)priority; (void)out;
+    if (fail_init_task) return pdFALSE;
+    int caller_core = current_core;
+    current_core = core;
+    fn(arg);
+    current_core = caller_core;
+    return pdPASS;
+}
+BaseType_t xPortGetCoreID(void) { return current_core; }
+void vTaskDelete(TaskHandle_t task) { assert(task == NULL); }
 esp_err_t i2c_param_config(int port, const i2c_config_t *cfg) { (void)port; (void)cfg; return ESP_OK; }
-esp_err_t i2c_driver_install(int p, int m, size_t a, size_t b, int f) { (void)p; (void)m; (void)a; (void)b; (void)f; return ESP_OK; }
+esp_err_t i2c_driver_install(int p, int m, size_t a, size_t b, int f) {
+    (void)p; (void)m; (void)a; (void)b; (void)f;
+    assert(current_core == 1); /* The driver's ISR inherits the installing core. */
+    return fail_driver ? ESP_FAIL : ESP_OK;
+}
 esp_err_t i2c_master_write_read_device(int p, int addr, const uint8_t *reg, size_t n, uint8_t *out, size_t len, TickType_t t) {
     (void)p; (void)addr; (void)n; (void)t;
+    if (*reg == 0x28) ++sample_reads;
     memcpy(out, &registers[*reg], len); return ESP_OK;
 }
 esp_err_t i2c_master_write_to_device(int p, int addr, const uint8_t *data, size_t len, TickType_t t) {
     (void)p; (void)addr; (void)t; assert(len == 2);
+    if (data[0] == 0x24 && data[1] == 1) {
+        assert(data_ready_handler_added);
+        assert(sample_reads > 0); /* Drain stale output before enabling INT2. */
+    }
+    if (data[0] == 0x23 && data[1] == 0x40) assert(tap_handler_added);
     registers[data[0]] = data[1]; return ESP_OK;
 }
 esp_err_t gpio_config(const gpio_config_t *cfg) { (void)cfg; return ESP_OK; }
 esp_err_t gpio_install_isr_service(int flags) { (void)flags; return ESP_OK; }
-esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) { (void)pin; (void)fn; (void)arg; return ESP_OK; }
+esp_err_t gpio_isr_handler_add(gpio_num_t pin, void (*fn)(void *), void *arg) {
+    (void)fn; (void)arg;
+    if (pin == APP_ACCEL_INT2_GPIO) data_ready_handler_added = true;
+    if (pin == APP_ACCEL_INT1_GPIO) tap_handler_added = true;
+    return ESP_OK;
+}
 esp_err_t gpio_intr_disable(gpio_num_t pin) { disabled[pin] = true; return ESP_OK; }
-int64_t esp_timer_get_time(void) { return 0; }
+int64_t esp_timer_get_time(void) { return 123456; }
+
+static void expect_valid_sample(const uint8_t raw[6], int16_t x, int16_t y, int16_t z) {
+    memcpy(&registers[0x28], raw, 6);
+    accel_sample_t sample = {0};
+    assert(accelerometer_read_sample(&sample));
+    assert(sample.x == x && sample.y == y && sample.z == z);
+    assert(sample.timestamp_us == 123456);
+}
+
+static void expect_invalid_sample(const uint8_t raw[6]) {
+    memcpy(&registers[0x28], raw, 6);
+    accel_sample_t sample = {.x = 4, .y = -8, .z = 12, .timestamp_us = 77};
+    assert(!accelerometer_read_sample(&sample));
+    assert(sample.x == 4 && sample.y == -8 && sample.z == 12 && sample.timestamp_us == 77);
+}
+
+static void tap_callback(void) {}
 
 int main(void) {
     registers[0x0f] = 0x44;
-    assert(accelerometer_init(NULL));
+    assert(accelerometer_init(tap_callback));
     assert(registers[0x20] == 0x84);
+    assert(registers[0x23] == 0x40);
+    /* Draining a malformed stale frame must not prevent INT2 from starting. */
+    const uint8_t stale_raw[] = {0x00, 0x4c, 0xf8, 0x1c, 0x02, 0x02};
+    memcpy(&registers[0x28], stale_raw, sizeof(stale_raw));
+    assert(accelerometer_set_data_ready_callback(NULL));
+    assert(registers[0x24] == 1);
+    /* Preserve the original hardware tap profile, separate from software4500. */
+    assert(registers[0x30] == 0x00 && registers[0x31] == 0x08);
+    assert(registers[0x32] == 0x40 && registers[0x33] == 0x06);
+
+    /* Valid 14-bit left-aligned data: rest, exact threshold, signed limits. */
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02}, 196, -1984, 520);
+    expect_valid_sample((const uint8_t[]){0xc4, 0x00, 0x94, 0x11, 0x08, 0x02}, 196, 4500, 520);
+    expect_valid_sample((const uint8_t[]){0xfc, 0x7f, 0x00, 0x80, 0x00, 0x00}, 32764, -32768, 0);
+
+    /* Exact frames from three spontaneous cues while the cane was still.
+       Z=514 violates OUT_Z_L's fixed-zero low bits in every frame. */
+    expect_invalid_sample((const uint8_t[]){0x00, 0x4c, 0xf8, 0x1c, 0x02, 0x02});
+    expect_invalid_sample((const uint8_t[]){0xc0, 0x00, 0x4c, 0x1c, 0x02, 0x02});
+    expect_invalid_sample((const uint8_t[]){0xc4, 0x00, 0xf8, 0x14, 0x02, 0x02});
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        for (unsigned bits = 1; bits <= 3; ++bits) {
+            uint8_t raw[] = {0xc4, 0x00, 0x40, 0xf8, 0x08, 0x02};
+            raw[axis * 2] |= bits;
+            expect_invalid_sample(raw);
+        }
+    }
     accelerometer_prepare_for_sleep();
     assert(registers[0x20] == 0x00);
     assert(registers[0x23] == 0x00 && registers[0x24] == 0x00);
     assert(disabled[14] && disabled[4]);
-    puts("PASS: LIS2DW12 ODR power-down and disabled interrupt routing");
+    fail_semaphore = true;
+    assert(!accelerometer_init(NULL));
+    fail_semaphore = false;
+    fail_init_task = true;
+    assert(!accelerometer_init(NULL));
+    fail_init_task = false;
+    fail_driver = true;
+    assert(!accelerometer_init(NULL));
+    assert(semaphores_created == semaphores_deleted);
+    puts("PASS: sensor startup, valid threshold/saturation, malformed-frame rejection, power-down");
     return 0;
 }

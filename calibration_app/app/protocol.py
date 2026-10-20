@@ -7,7 +7,7 @@ import zlib
 from app.cobs import decode as cobs_decode
 from app.cobs import encode as cobs_encode
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 CAL_PKT_METADATA = 0x01
 CAL_PKT_SAMPLE_BATCH = 0x02
 CAL_PKT_STATUS = 0x03

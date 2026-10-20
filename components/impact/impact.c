@@ -5,6 +5,22 @@ static int64_t s_last_accepted_us;
 static bool s_has_accepted_impact;
 static bool s_selected_axis_above_threshold;
 
+impact_candidate_result_t impact_process_sample(const accel_sample_t *sample, bool tap_confirmed,
+    bt_audio_play_result_t (*start_audio)(void), impact_event_t *event) {
+    if (!tap_confirmed) return IMPACT_CANDIDATE_NO_TAP;
+    impact_candidate_result_t result = impact_classify_candidate(sample, sample->timestamp_us, event);
+    if (result != IMPACT_CANDIDATE_PROCESSED) return result;
+
+    /* Preserve the original normal-mode policy: every eligible tap starts
+       refractory, including an attempt skipped by playback. */
+    impact_mark_accepted(event->timestamp_us);
+    switch (start_audio()) {
+        case BT_AUDIO_PLAY_STARTED: return IMPACT_CANDIDATE_PROCESSED;
+        case BT_AUDIO_PLAY_BUSY: return IMPACT_CANDIDATE_AUDIO_BUSY;
+        default: return IMPACT_CANDIDATE_AUDIO_UNAVAILABLE;
+    }
+}
+
 static int16_t selected_axis(const accel_sample_t *sample) {
     switch (s_config.axis) {
         case APP_IMPACT_AXIS_X: return sample->x;
