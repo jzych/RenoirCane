@@ -42,19 +42,14 @@ preamble at 115200. A host listening at 921600 can count that preamble as invali
 frames. Discard/synchronize startup first and record its errors separately;
 the production frame parser remains strict throughout the binary session.
 
-Firmware-log forwarding failures are contained in the controller. The reader's
-pre-existing, separate batch-diagnostics failure behavior is unchanged: if both
-of those diagnostic backends fail, the reader can close the connection before
-dispatching packets. That behavior is outside task 6's permitted app files.
-
-Review follow-up proposal (not implemented): make the shared `diagnose()`
-adapter in `calibration_app/app/diagnostics.py` catch exceptions from its Python
-logging fallback as well as Android logging. Drop the diagnostic if both fail,
-without recursively logging the failure. Add reader regressions that fail both
-backends on decoded-packet and bad-frame diagnostics, then verify valid packets
-still dispatch, the backend is not closed and `reader.error` remains unset.
-Keep actual serial read failures terminal. This expands the original app-file
-scope to the shared adapter and its regression tests.
+The shared `diagnose()` adapter contains exceptions from both Android logging
+and its Python logging fallback. If both fail, it drops the diagnostic without
+recursively logging the failure. Reader regressions cover decoded-packet and
+bad-frame diagnostics: valid packets still dispatch, the backend is not closed
+and `reader.error` remains unset. Actual serial read failures still close the
+backend and report a reader error. This review follow-up was explicitly
+approved, expanding the original app-file scope to the shared adapter and its
+regression tests.
 
 ## Acceptance check
 
@@ -70,9 +65,10 @@ Automated coverage includes capture/transport startup order, initialization
 failure, VFS mount translation, concurrent producers, truncation, ring overflow
 and wrap, UART drain failure, failed/short log writes and loss-count saturation,
 mixed packet priority/event accounting, UTF-8
-fragmentation/reset and controller diagnostic failure. The native regression
-suites, 43 Unity cases, 68 app tests and both firmware builds passed; the Unity
-device image compiled without upload or device execution.
+fragmentation/reset, controller diagnostic failure and reader diagnostic sink
+failures. The native regression suites, 43 Unity cases, 70 app tests and both
+firmware builds passed; the Unity device image compiled without upload or
+device execution.
 
 Task 5's physical impact-detection acceptance is separate.
 
