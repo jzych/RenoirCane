@@ -4,6 +4,9 @@
 #include <string.h>
 #include "sdk.h"
 static unsigned profile_inits;
+static unsigned profile_cleanups;
+static esp_err_t cleanup_result = ESP_OK;
+esp_err_t fake_source_deinit(void) { ++profile_cleanups; return cleanup_result; }
 static esp_err_t profile_result = ESP_OK;
 static bool profile_success_during_request;
 static void profile_event(int state);
@@ -15,8 +18,10 @@ static esp_err_t retry_profile_init(void) {
 /* The SDK test header supplies an inline successful source_init; override only
    the adapter call so asynchronous profile failures can be exercised. */
 #define esp_a2d_source_init retry_profile_init
+#define esp_a2d_source_deinit fake_source_deinit
 #include "../bluetooth_audio.c"
 #undef esp_a2d_source_init
+#undef esp_a2d_source_deinit
 
 const uint8_t impact_pcm_start[4] = {0};
 const uint8_t impact_pcm_end[1] = {0};
@@ -31,8 +36,12 @@ static void reset(void) {
     s_worker = (void *)1;
     s_shutdown_requested = s_link_opening = s_link_connected = false;
     s_disconnect_pending = s_recovering = s_profile_retry_pending = false;
+    s_profile_cleanup_pending = false;
+    s_disconnect_deadline_us = 0;
     s_profile_retry_at_us = 0;
     connects = disconnects = media_commands = profile_inits = 0;
+    profile_cleanups = 0;
+    cleanup_result = ESP_OK;
     fail_disconnect = fail_media = false;
     profile_result = ESP_OK;
     profile_success_during_request = false;
@@ -84,6 +93,92 @@ static void profile_event(int state) {
 
 int main(void) {
     const int64_t delay = (int64_t)APP_BT_RECONNECT_MS * 1000;
+    /* A queued close can vanish inside IDF. Do not wait forever or fake a
+       disconnected link: confirm profile cleanup before initializing again. */
+    reset();
+    tick(0);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    fail_media = true;
+    process_keep_media_started();
+    tick(delay);
+    assert(disconnects == 1 && connects == 1);
+    tick(delay + 9999999);
+    assert(profile_cleanups == 0);
+    tick(delay + 10000000);
+    assert(profile_cleanups == 1 && connects == 1);
+    assert(!bluetooth_audio_is_connected());
+    assert(bluetooth_audio_start_impact() == BT_AUDIO_PLAY_DISCONNECTED);
+    bluetooth_audio_request_reconnect();
+    tick(delay + 19999999);
+    assert(profile_cleanups == 1 && connects == 1 && profile_inits == 0);
+    /* Lost cleanup completion is bounded too, and queue failure is retried
+       at the configured cadence rather than at every worker poll. */
+    cleanup_result = ESP_FAIL;
+    tick(delay + 20000000);
+    assert(profile_cleanups == 2);
+    tick(2 * delay + 20000000 - 1);
+    assert(profile_cleanups == 2);
+    cleanup_result = ESP_OK;
+    tick(2 * delay + 20000000);
+    assert(profile_cleanups == 3);
+    emit_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED);
+    tick(2 * delay + 20000000);
+    assert(connects == 1 && profile_inits == 0);
+    profile_event(ESP_A2D_DEINIT_SUCCESS);
+    tick(3 * delay + 20000000 - 1);
+    assert(profile_inits == 0 && connects == 1);
+    tick(3 * delay + 20000000);
+    assert(profile_inits == 1 && connects == 1);
+    profile_event(ESP_A2D_INIT_SUCCESS);
+    tick(3 * delay + 20000000);
+    assert(connects == 2);
+    assert(bluetooth_audio_policy_attempted_speaker(&s_policy) == BT_AUDIO_SPEAKER_SECONDARY);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    assert(bluetooth_audio_is_connected());
+
+    /* In IDF's CLOSING state deinit can complete without a separate old-link
+       DISCONNECTED callback. The confirmed profile event is sufficient. */
+    reset();
+    tick(0);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    fail_media = true;
+    process_keep_media_started();
+    tick(delay);
+    tick(delay + 10000000);
+    assert(profile_cleanups == 1 && s_link_connected);
+    profile_event(ESP_A2D_DEINIT_SUCCESS);
+    assert(!s_link_connected && !s_disconnect_pending);
+    tick(2 * delay + 10000000);
+    profile_event(ESP_A2D_INIT_SUCCESS);
+    tick(2 * delay + 10000000);
+    assert(connects == 2);
+
+    /* A timely callback cancels the deadline, including after reconnect. */
+    reset();
+    tick(0);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    fail_media = true;
+    process_keep_media_started();
+    tick(delay);
+    tick(delay + 9999999);
+    emit_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED);
+    tick(delay + 10000000);
+    assert(profile_cleanups == 0 && connects == 2);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    tick(delay + 20000000);
+    assert(profile_cleanups == 0 && bluetooth_audio_is_connected());
+
+    /* Shutdown keeps its own bounded wait and must not initialize profiles. */
+    reset();
+    tick(0);
+    emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);
+    fail_media = true;
+    process_keep_media_started();
+    tick(delay);
+    assert(!bluetooth_audio_shutdown(0));
+    tick(delay + 10000000);
+    assert(profile_cleanups == 0 && profile_inits == 0 && connects == 1);
+
     reset();
     tick(0);
     emit_connection(ESP_A2D_CONNECTION_STATE_CONNECTED);

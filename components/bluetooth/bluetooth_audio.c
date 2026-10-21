@@ -19,6 +19,7 @@
 #include "nvs_flash.h"
 
 #define WORKER_INTERVAL_MS 50U
+#define DISCONNECT_COMPLETION_TIMEOUT_MS 10000U
 #define SHUTDOWN_COMPLETE_BIT (1U << 0)
 
 static const char *TAG = "BT_AUDIO";
@@ -39,6 +40,8 @@ static bool s_shutdown_requested;
 static bool s_link_opening;
 static bool s_link_connected;
 static bool s_disconnect_pending;
+static int64_t s_disconnect_deadline_us;
+static bool s_profile_cleanup_pending;
 static bool s_recovering;
 static bool s_profile_retry_pending;
 static int64_t s_profile_retry_at_us;
@@ -109,6 +112,9 @@ static void recoverable_error(const char *operation, esp_err_t error) {
 }
 
 static void request_disconnect(void) {
+    portENTER_CRITICAL(&s_lock);
+    s_disconnect_deadline_us = esp_timer_get_time() + (int64_t)DISCONNECT_COMPLETION_TIMEOUT_MS * 1000;
+    portEXIT_CRITICAL(&s_lock);
     esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
     if (error != ESP_OK) {
         portENTER_CRITICAL(&s_lock);
@@ -249,6 +255,31 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             }
             break;
         case ESP_A2D_PROF_STATE_EVT:
+            portENTER_CRITICAL(&s_lock);
+            bool cleaning_up = s_profile_cleanup_pending;
+            if (cleaning_up && param->a2d_prof_stat.init_state == ESP_A2D_DEINIT_SUCCESS) {
+                /* Confirmed profile teardown invalidates its old link. A late
+                   DISCONNECTED alone cannot finish a pending profile cleanup. */
+                s_profile_cleanup_pending = false;
+                s_link_opening = false;
+                s_link_connected = false;
+                s_disconnect_pending = false;
+                s_source_ready = false;
+                s_profile_retry_pending = true;
+                s_profile_retry_at_us = esp_timer_get_time() + (int64_t)APP_BT_RECONNECT_MS * 1000;
+                bluetooth_audio_policy_on_recoverable_error(&s_policy, esp_timer_get_time());
+                s_recovering = s_policy.state != BT_AUDIO_ERROR;
+            }
+            portEXIT_CRITICAL(&s_lock);
+            if (cleaning_up) {
+                if (param->a2d_prof_stat.init_state == ESP_A2D_DEINIT_SUCCESS) {
+                    audio_stop();
+                    notify_state(bluetooth_audio_get_state());
+                    wake_worker();
+                    ESP_LOGI(TAG, "A2DP profile cleanup complete; waiting to initialize source");
+                }
+                break;
+            }
             if (param->a2d_prof_stat.init_state == ESP_A2D_INIT_SUCCESS) {
                 portENTER_CRITICAL(&s_lock);
                 s_source_ready = true;
@@ -272,11 +303,25 @@ static void attempt_connection(int64_t now_us) {
     bool should_connect = false;
     bool disconnect = false;
     bool retry_profile = false;
+    bool cleanup_profile = false;
     bt_audio_speaker_t speaker = BT_AUDIO_SPEAKER_PRIMARY;
     portENTER_CRITICAL(&s_lock);
     if (!s_shutdown_requested && s_policy.state != BT_AUDIO_ERROR && now_us >= s_policy.retry_at_us) {
-        if (s_recovering && (s_link_opening || s_disconnect_pending)) {
-            /* Wait for the stack's completion event before reusing the link. */
+        if (s_profile_cleanup_pending || s_disconnect_pending) {
+            if (now_us >= s_disconnect_deadline_us) {
+                /* IDF may drop a queued close, then ignore further disconnects
+                   in CLOSING. Reset only the A2DP profile through its public
+                   cleanup API; never invent a disconnected link or reconnect
+                   until profile teardown has actually been confirmed. */
+                cleanup_profile = true;
+                s_profile_cleanup_pending = true;
+                s_source_ready = false;
+                bluetooth_audio_policy_on_recoverable_error(&s_policy, now_us);
+                s_recovering = true;
+                s_disconnect_deadline_us = now_us + (int64_t)DISCONNECT_COMPLETION_TIMEOUT_MS * 1000;
+            }
+        } else if (s_recovering && s_link_opening) {
+            /* The opening link must finish before it can be disconnected. */
         } else if (s_recovering && s_link_connected) {
             disconnect = true;
             s_disconnect_pending = true;
@@ -296,6 +341,20 @@ static void attempt_connection(int64_t now_us) {
         s_recovering = false;
     }
     portEXIT_CRITICAL(&s_lock);
+    if (cleanup_profile) {
+        audio_stop();
+        notify_state(bluetooth_audio_get_state());
+        ESP_LOGW(TAG, "A2DP disconnect completion timed out; requesting profile cleanup");
+        esp_err_t error = esp_a2d_source_deinit();
+        if (error != ESP_OK) {
+            portENTER_CRITICAL(&s_lock);
+            if (s_profile_cleanup_pending) {
+                s_disconnect_deadline_us = now_us + (int64_t)APP_BT_RECONNECT_MS * 1000;
+            }
+            portEXIT_CRITICAL(&s_lock);
+            ESP_LOGW(TAG, "A2DP profile cleanup request failed: %s", esp_err_to_name(error));
+        }
+    }
     if (disconnect) request_disconnect();
     if (retry_profile) {
         ESP_LOGI(TAG, "retrying A2DP source profile initialization");
@@ -497,7 +556,7 @@ void bluetooth_audio_request_reconnect(void) {
     bool disconnect;
     bool awaiting_connection;
     portENTER_CRITICAL(&s_lock);
-    if (s_shutdown_requested || s_policy.state == BT_AUDIO_ERROR) {
+    if (s_shutdown_requested || s_policy.state == BT_AUDIO_ERROR || s_recovering) {
         portEXIT_CRITICAL(&s_lock);
         return;
     }

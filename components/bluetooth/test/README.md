@@ -28,6 +28,16 @@ state, and wait `APP_BT_RECONNECT_MS`. The configured value is currently
 Speaker alternation is retained. Existing links are disconnected before
 issuing another connect; a late disconnect does not restart the delay.
 Failed cleanup requests wait another full interval before trying again.
+Queued disconnects have a 10-second completion deadline. If it expires,
+the worker requests A2DP source profile deinitialization: in IDF 5.2.1,
+the CLOSING state ignores repeated disconnect commands after a lost close.
+Only `ESP_A2D_DEINIT_SUCCESS` permits clearing the old profile/link state;
+a late DISCONNECTED callback alone cannot complete profile cleanup.
+The source is initialized again after the configured retry delay, then
+normal speaker alternation resumes. Cleanup requests that fail immediately
+retry after `APP_BT_RECONNECT_MS`; accepted requests without completion
+retry after 10 seconds. Playback/connect/init stay gated during cleanup,
+and standby suppresses this recovery work.
 
 ESP-IDF 5.2.1 queues profile initialization before reporting success. An
 asynchronous allocation/startup failure can omit the completion callback;
