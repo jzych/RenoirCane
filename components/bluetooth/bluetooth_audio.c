@@ -39,6 +39,9 @@ static bool s_shutdown_requested;
 static bool s_link_opening;
 static bool s_link_connected;
 static bool s_disconnect_pending;
+static bool s_recovering;
+static bool s_profile_retry_pending;
+static int64_t s_profile_retry_at_us;
 static EventGroupHandle_t s_shutdown_events;
 
 static void wake_worker(void) {
@@ -86,10 +89,33 @@ static void set_state(bt_audio_state_t state) {
     }
 }
 
-static void media_error(const char *operation, esp_err_t error) {
+static void fatal_error(const char *operation, esp_err_t error) {
     ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(error));
     audio_stop();
     set_state(BT_AUDIO_ERROR);
+}
+
+static void recoverable_error(const char *operation, esp_err_t error) {
+    ESP_LOGE(TAG, "%s failed: %s; retrying after %u ms", operation, esp_err_to_name(error),
+             APP_BT_RECONNECT_MS);
+    audio_stop();
+    portENTER_CRITICAL(&s_lock);
+    bluetooth_audio_policy_on_recoverable_error(&s_policy, esp_timer_get_time());
+    s_recovering = s_policy.state != BT_AUDIO_ERROR;
+    bt_audio_state_t state = s_policy.state;
+    portEXIT_CRITICAL(&s_lock);
+    notify_state(state);
+    wake_worker();
+}
+
+static void request_disconnect(void) {
+    esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
+    if (error != ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        s_disconnect_pending = false;
+        portEXIT_CRITICAL(&s_lock);
+        recoverable_error("A2DP disconnect request", error);
+    }
 }
 
 static int32_t a2dp_data_callback(uint8_t *data, int32_t len) {
@@ -129,17 +155,14 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
         portENTER_CRITICAL(&s_lock);
         s_link_opening = false;
         s_link_connected = true;
-        disconnect_for_reconnect = bluetooth_audio_policy_on_connected(&s_policy);
+        disconnect_for_reconnect = !s_recovering && bluetooth_audio_policy_on_connected(&s_policy);
         disconnect_for_reconnect = disconnect_for_reconnect && !s_shutdown_requested && !s_disconnect_pending;
         if (disconnect_for_reconnect) s_disconnect_pending = true;
         portEXIT_CRITICAL(&s_lock);
-        notify_state(BT_AUDIO_CONNECTED);
+        notify_state(bluetooth_audio_get_state());
         if (disconnect_for_reconnect) {
             ESP_LOGI(TAG, "disconnecting established A2DP link for requested reconnect");
-            esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
-            if (error != ESP_OK) {
-                media_error("A2DP disconnect request", error);
-            }
+            request_disconnect();
         }
         wake_worker();
         ESP_LOGI(TAG, "connected to configured speaker");
@@ -149,9 +172,11 @@ static void connection_state_changed(const esp_a2d_cb_param_t *param) {
         s_link_opening = false;
         s_link_connected = false;
         s_disconnect_pending = false;
-        bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
+        /* Recovery already scheduled a deadline. A late disconnect must not
+           postpone it or apply a stale manual-reconnect shortcut. */
+        if (!s_recovering) bluetooth_audio_policy_on_disconnected(&s_policy, now_us);
         portEXIT_CRITICAL(&s_lock);
-        notify_state(BT_AUDIO_DISABLED);
+        notify_state(bluetooth_audio_get_state());
         wake_worker();
         ESP_LOGW(TAG, "configured speaker disconnected");
     }
@@ -166,15 +191,20 @@ static void media_acknowledged(const esp_a2d_cb_param_t *param) {
         handled = bluetooth_audio_policy_on_source_ready(&s_policy, success);
         portEXIT_CRITICAL(&s_lock);
         if (handled) {
-            wake_worker();
+            if (success) wake_worker();
+            else recoverable_error("A2DP source readiness", ESP_FAIL);
         }
     } else if (command == ESP_A2D_MEDIA_CTRL_START) {
         portENTER_CRITICAL(&s_lock);
         handled = bluetooth_audio_policy_on_media_start_result(&s_policy, success);
         portEXIT_CRITICAL(&s_lock);
         if (handled) {
-            set_state(success ? BT_AUDIO_STREAMING : BT_AUDIO_CONNECTED);
-            wake_worker();
+            if (success) {
+                set_state(BT_AUDIO_STREAMING);
+                wake_worker();
+            } else {
+                recoverable_error("A2DP media start", ESP_FAIL);
+            }
         }
     } else if (command == ESP_A2D_MEDIA_CTRL_SUSPEND) {
         portENTER_CRITICAL(&s_lock);
@@ -222,10 +252,15 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             if (param->a2d_prof_stat.init_state == ESP_A2D_INIT_SUCCESS) {
                 portENTER_CRITICAL(&s_lock);
                 s_source_ready = true;
+                s_profile_retry_pending = false;
                 portEXIT_CRITICAL(&s_lock);
                 wake_worker();
             } else {
-                media_error("A2DP source profile initialization", ESP_FAIL);
+                portENTER_CRITICAL(&s_lock);
+                s_source_ready = false;
+                s_profile_retry_pending = true;
+                portEXIT_CRITICAL(&s_lock);
+                recoverable_error("A2DP source profile initialization", ESP_FAIL);
             }
             break;
         default:
@@ -234,17 +269,46 @@ static void a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
 }
 
 static void attempt_connection(int64_t now_us) {
-    bool should_connect;
+    bool should_connect = false;
+    bool disconnect = false;
+    bool retry_profile = false;
     bt_audio_speaker_t speaker = BT_AUDIO_SPEAKER_PRIMARY;
     portENTER_CRITICAL(&s_lock);
-    should_connect = !s_shutdown_requested && s_source_ready && s_policy.state != BT_AUDIO_ERROR &&
-                     bluetooth_audio_policy_should_connect(&s_policy, now_us);
+    if (!s_shutdown_requested && s_policy.state != BT_AUDIO_ERROR && now_us >= s_policy.retry_at_us) {
+        if (s_recovering && (s_link_opening || s_disconnect_pending)) {
+            /* Wait for the stack's completion event before reusing the link. */
+        } else if (s_recovering && s_link_connected) {
+            disconnect = true;
+            s_disconnect_pending = true;
+        } else if (s_profile_retry_pending && now_us >= s_profile_retry_at_us) {
+            retry_profile = true;
+            /* ESP_OK means queued, not initialized. Some IDF asynchronous
+               failures emit no completion event; retain a bounded retry. */
+            s_profile_retry_at_us = now_us + (int64_t)APP_BT_RECONNECT_MS * 1000;
+        } else if (s_source_ready) {
+            should_connect = bluetooth_audio_policy_should_connect(&s_policy, now_us);
+        }
+    }
     if (should_connect) {
         speaker = bluetooth_audio_policy_attempted_speaker(&s_policy);
         memcpy(s_active_speaker_bda, s_speaker_bdas[speaker], ESP_BD_ADDR_LEN);
         s_link_opening = true;
+        s_recovering = false;
     }
     portEXIT_CRITICAL(&s_lock);
+    if (disconnect) request_disconnect();
+    if (retry_profile) {
+        ESP_LOGI(TAG, "retrying A2DP source profile initialization");
+        esp_err_t error = esp_a2d_source_init();
+        if (error != ESP_OK) {
+            portENTER_CRITICAL(&s_lock);
+            /* An older queued init may complete between choosing this retry
+               and calling IDF. Preserve that success over INVALID_STATE. */
+            bool retry_failed = !s_source_ready;
+            portEXIT_CRITICAL(&s_lock);
+            if (retry_failed) recoverable_error("A2DP source profile initialization", error);
+        }
+    }
     if (!should_connect) {
         return;
     }
@@ -278,14 +342,7 @@ static void process_keep_media_started(void) {
                                         : ESP_A2D_MEDIA_CTRL_START;
     esp_err_t error = esp_a2d_media_ctrl(command);
     if (error != ESP_OK) {
-        ESP_LOGW(TAG, "A2DP media command %d failed: %s", command, esp_err_to_name(error));
-        portENTER_CRITICAL(&s_lock);
-        if (action == BT_AUDIO_MEDIA_ACTION_CHECK_SOURCE_READY) {
-            bluetooth_audio_policy_on_source_ready(&s_policy, false);
-        } else {
-            bluetooth_audio_policy_on_media_start_result(&s_policy, false);
-        }
-        portEXIT_CRITICAL(&s_lock);
+        recoverable_error("A2DP media command", error);
     }
 }
 
@@ -332,31 +389,31 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
 
     if (s_shutdown_events == NULL) s_shutdown_events = xEventGroupCreate();
     if (s_shutdown_events == NULL) {
-        media_error("shutdown event allocation", ESP_ERR_NO_MEM);
+        fatal_error("shutdown event allocation", ESP_ERR_NO_MEM);
         return false;
     }
 
     esp_err_t error = nvs_flash_init();
     if (error != ESP_OK) {
-        media_error("NVS initialization", error);
+        fatal_error("NVS initialization", error);
         return false;
     }
     error = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
     if (error != ESP_OK) {
-        media_error("BLE controller memory release", error);
+        fatal_error("BLE controller memory release", error);
         return false;
     }
     esp_bt_controller_config_t controller_config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     if ((error = esp_bt_controller_init(&controller_config)) != ESP_OK ||
         (error = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT)) != ESP_OK) {
-        media_error("Classic Bluetooth controller initialization", error);
+        fatal_error("Classic Bluetooth controller initialization", error);
         return false;
     }
     esp_bluedroid_config_t bluedroid_config = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
     bluedroid_config.ssp_en = true;
     if ((error = esp_bluedroid_init_with_cfg(&bluedroid_config)) != ESP_OK ||
         (error = esp_bluedroid_enable()) != ESP_OK) {
-        media_error("Bluedroid initialization", error);
+        fatal_error("Bluedroid initialization", error);
         return false;
     }
 
@@ -365,10 +422,18 @@ bool bluetooth_audio_init(bt_audio_state_callback_t callback) {
         (error = esp_bt_gap_register_callback(gap_callback)) != ESP_OK ||
         (error = esp_bt_dev_set_device_name("Cane Audio ECU")) != ESP_OK ||
         (error = esp_a2d_register_callback(a2dp_callback)) != ESP_OK ||
-        (error = esp_a2d_source_register_data_callback(a2dp_data_callback)) != ESP_OK ||
-        (error = esp_a2d_source_init()) != ESP_OK ||
+        (error = esp_a2d_source_register_data_callback(a2dp_data_callback)) != ESP_OK) {
+        fatal_error("Bluetooth profile initialization", error);
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_profile_retry_pending = true;
+    s_profile_retry_at_us = esp_timer_get_time() + (int64_t)APP_BT_RECONNECT_MS * 1000;
+    portEXIT_CRITICAL(&s_lock);
+    if ((error = esp_a2d_source_init()) != ESP_OK ||
         (error = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE)) != ESP_OK) {
-        media_error("Bluetooth profile initialization", error);
+        fatal_error("Bluetooth profile initialization", error);
         return false;
     }
 
@@ -390,7 +455,7 @@ void bluetooth_audio_start(void) {
         portENTER_CRITICAL(&s_lock);
         s_started = false;
         portEXIT_CRITICAL(&s_lock);
-        media_error("Bluetooth worker creation", ESP_ERR_NO_MEM);
+        fatal_error("Bluetooth worker creation", ESP_ERR_NO_MEM);
     }
 }
 
@@ -432,7 +497,7 @@ void bluetooth_audio_request_reconnect(void) {
     bool disconnect;
     bool awaiting_connection;
     portENTER_CRITICAL(&s_lock);
-    if (s_shutdown_requested) {
+    if (s_shutdown_requested || s_policy.state == BT_AUDIO_ERROR) {
         portEXIT_CRITICAL(&s_lock);
         return;
     }
@@ -444,12 +509,9 @@ void bluetooth_audio_request_reconnect(void) {
 
     audio_stop();
     if (disconnect) {
-        esp_err_t error = esp_a2d_source_disconnect(s_active_speaker_bda);
-        if (error != ESP_OK) {
-            media_error("A2DP disconnect request", error);
-        }
+        request_disconnect();
     } else if (!awaiting_connection) {
-        notify_state(BT_AUDIO_DISABLED);
+        notify_state(bluetooth_audio_get_state());
         wake_worker();
     }
 }
