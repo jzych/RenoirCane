@@ -60,7 +60,8 @@ typedef enum { ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY, ESP_A2D_MEDIA_CTRL_START,
 #define ESP_A2D_MEDIA_CTRL_ACK_SUCCESS 0
 #define ESP_A2D_AUDIO_STATE_STARTED 1
 #define ESP_A2D_AUDIO_STATE_SUSPEND 2
-#define ESP_A2D_INIT_SUCCESS 0
+#define ESP_A2D_DEINIT_SUCCESS 0
+#define ESP_A2D_INIT_SUCCESS 1
 typedef union {
     struct { esp_a2d_connection_state_t state; esp_bd_addr_t remote_bda; } conn_stat;
     struct { esp_a2d_media_ctrl_t cmd; int status; } media_ctrl_stat;
@@ -73,6 +74,7 @@ esp_err_t esp_a2d_media_ctrl(esp_a2d_media_ctrl_t);
 static inline esp_err_t esp_a2d_register_callback(void (*cb)(esp_a2d_cb_event_t, esp_a2d_cb_param_t *)) { (void)cb; return ESP_OK; }
 static inline esp_err_t esp_a2d_source_register_data_callback(int32_t (*cb)(uint8_t *, int32_t)) { (void)cb; return ESP_OK; }
 static inline esp_err_t esp_a2d_source_init(void) { return ESP_OK; }
+static inline esp_err_t esp_a2d_source_deinit(void) { return ESP_OK; }
 
 typedef int esp_bt_gap_cb_event_t;
 typedef struct { struct { esp_bd_addr_t bda; } cfm_req; } esp_bt_gap_cb_param_t;

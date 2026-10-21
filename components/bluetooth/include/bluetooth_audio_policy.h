@@ -48,3 +48,6 @@ bool bluetooth_audio_policy_on_media_suspended(bt_audio_policy_t *policy);
    disconnect the now-established A2DP link so the normal disconnected path can reconnect. */
 bool bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy);
 void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t now_us);
+/* Drop stale media/manual-reconnect state and wait the normal retry interval.
+   Speaker alternation is preserved; fatal BT_AUDIO_ERROR remains terminal. */
+void bluetooth_audio_policy_on_recoverable_error(bt_audio_policy_t *policy, int64_t now_us);

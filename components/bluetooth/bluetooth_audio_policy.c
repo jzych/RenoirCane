@@ -15,7 +15,8 @@ void bluetooth_audio_policy_init(bt_audio_policy_t *policy) {
 }
 
 bool bluetooth_audio_policy_should_connect(bt_audio_policy_t *policy, int64_t now_us) {
-    if (policy->attempt_outstanding || policy->state == BT_AUDIO_CONNECTED || policy->state == BT_AUDIO_STREAMING ||
+    if (policy->state == BT_AUDIO_ERROR || policy->attempt_outstanding ||
+        policy->state == BT_AUDIO_CONNECTED || policy->state == BT_AUDIO_STREAMING ||
         now_us < policy->retry_at_us) {
         return false;
     }
@@ -41,6 +42,7 @@ void bluetooth_audio_policy_on_connection_request_failed(bt_audio_policy_t *poli
 }
 
 bool bluetooth_audio_policy_request_reconnect(bt_audio_policy_t *policy) {
+    if (policy->state == BT_AUDIO_ERROR) return false;
     bool disconnect = policy->state == BT_AUDIO_CONNECTED || policy->state == BT_AUDIO_STREAMING;
     if (policy->state == BT_AUDIO_CONNECTING || disconnect) {
         /* ESP-IDF drops A2DP disconnect requests while the connection is still opening.  Preserve
@@ -100,6 +102,7 @@ bool bluetooth_audio_policy_on_media_suspended(bt_audio_policy_t *policy) {
 }
 
 bool bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy) {
+    if (policy->state == BT_AUDIO_ERROR) return false;
     bool reconnect_requested = policy->reconnect_requested;
     policy->state = BT_AUDIO_CONNECTED;
     policy->attempt_outstanding = false;
@@ -110,6 +113,7 @@ bool bluetooth_audio_policy_on_connected(bt_audio_policy_t *policy) {
 }
 
 void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t now_us) {
+    if (policy->state == BT_AUDIO_ERROR) return;
     if (policy->reconnect_requested) {
         bluetooth_audio_policy_init(policy);
         return;
@@ -120,4 +124,10 @@ void bluetooth_audio_policy_on_disconnected(bt_audio_policy_t *policy, int64_t n
     policy->media_streaming = false;
     policy->media_action_pending = BT_AUDIO_MEDIA_ACTION_NONE;
     policy->source_ready = false;
+}
+
+void bluetooth_audio_policy_on_recoverable_error(bt_audio_policy_t *policy, int64_t now_us) {
+    if (policy->state == BT_AUDIO_ERROR) return;
+    policy->reconnect_requested = false;
+    bluetooth_audio_policy_on_disconnected(policy, now_us);
 }
